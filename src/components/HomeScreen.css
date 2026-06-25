@@ -1,0 +1,524 @@
+/* ─── HomeScreen Styles ─────────────────────────────────────────────── */
+
+.hs-container {
+  position: relative;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background-color: #f8f8f8;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  padding: 20px;
+  overflow: visible;
+}
+
+/* ─── Background Orbs ───────────────────────────────────────────────── */
+
+.hs-bg-layer {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.hs-bg-orb {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(80px);
+  opacity: 0.35;
+  animation: hs-float 20s ease-in-out infinite;
+}
+
+.hs-bg-orb-1 {
+  width: 400px;
+  height: 400px;
+  background: radial-gradient(circle, #6366f1, transparent 70%);
+  top: -100px;
+  right: -100px;
+  animation-delay: 0s;
+}
+
+.hs-bg-orb-2 {
+  width: 350px;
+  height: 350px;
+  background: radial-gradient(circle, #ec4899, transparent 70%);
+  bottom: -80px;
+  left: -80px;
+  animation-delay: -7s;
+}
+
+.hs-bg-orb-3 {
+  width: 250px;
+  height: 250px;
+  background: radial-gradient(circle, #06b6d4, transparent 70%);
+  top: 40%;
+  left: 50%;
+  transform: translateX(-50%);
+  animation-delay: -14s;
+}
+
+@keyframes hs-float {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  25% { transform: translate(10px, -15px) scale(1.02); }
+  50% { transform: translate(-5px, 10px) scale(0.98); }
+  75% { transform: translate(15px, 5px) scale(1.01); }
+}
+
+.hs-bg-orb-3 {
+  animation-name: hs-float-3;
+}
+
+@keyframes hs-float-3 {
+  0%, 100% { transform: translateX(-50%) translate(0, 0) scale(1); }
+  25% { transform: translateX(-50%) translate(10px, -15px) scale(1.02); }
+  50% { transform: translateX(-50%) translate(-5px, 10px) scale(0.98); }
+  75% { transform: translateX(-50%) translate(15px, 5px) scale(1.01); }
+}
+
+/* ─── Logo ──────────────────────────────────────────────────────────── */
+
+.hs-logo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 32px;
+  font-weight: 700;
+  color: #1a1a1a;
+  margin-bottom: 8px;
+  letter-spacing: -0.5px;
+  z-index: 1;
+  position: relative;
+}
+
+.hs-logo svg {
+  color: #6366f1;
+  flex-shrink: 0;
+}
+
+/* ─── Tagline ───────────────────────────────────────────────────────── */
+
+.hs-tagline {
+  font-size: 15px;
+  color: #888;
+  margin-bottom: 28px;
+  z-index: 1;
+  position: relative;
+}
+
+/* ─── Search Wrapper ────────────────────────────────────────────────── */
+
+.hs-search-wrapper {
+  width: 100%;
+  max-width: 640px;
+  z-index: 1;
+  position: relative;
+}
+
+/* ─── Search Form ───────────────────────────────────────────────────── */
+
+.hs-search-form {
+  background: white;
+  border-radius: 16px;
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.08),
+    0 8px 24px rgba(0, 0, 0, 0.06),
+    0 0 0 1px rgba(0, 0, 0, 0.03);
+  overflow: visible;
+  transition: box-shadow 0.2s ease;
+}
+
+.hs-search-form:focus-within {
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.08),
+    0 8px 32px rgba(99, 102, 241, 0.12),
+    0 0 0 2px rgba(99, 102, 241, 0.2);
+}
+
+/* ─── Search Input ──────────────────────────────────────────────────── */
+
+.hs-search-input {
+  width: 100%;
+  padding: 18px 20px;
+  border: none;
+  outline: none;
+  font-size: 16px;
+  background: transparent;
+  color: #1a1a1a;
+  transition: color 0.15s ease;
+}
+
+.hs-search-input::placeholder {
+  color: #aaa;
+  transition: color 0.15s ease;
+}
+
+.hs-search-input.focused::placeholder {
+  color: #ccc;
+}
+
+/* ─── Search Controls ───────────────────────────────────────────────── */
+
+.hs-search-controls {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 10px 8px;
+  border-top: 1px solid #f0f0f0;
+}
+
+.hs-controls-left,
+.hs-controls-right {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* ─── Control Buttons ───────────────────────────────────────────────── */
+
+.hs-control-button,
+.hs-control-button-with-text {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border: none;
+  background: transparent;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  color: #666;
+  transition: background-color 0.15s ease, color 0.15s ease;
+  white-space: nowrap;
+}
+
+.hs-control-button:hover,
+.hs-control-button-with-text:hover {
+  background: #f5f5f5;
+  color: #333;
+}
+
+.hs-control-button {
+  padding: 8px;
+}
+
+/* ─── Model Button ──────────────────────────────────────────────────── */
+
+.hs-model-button {
+  width: 300px;
+  padding: 8px 10px;
+  justify-content: flex-start;
+}
+
+.hs-model-button-label {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: left;
+}
+
+.hs-token-pct {
+  font-size: 0.72rem;
+  color: #888;
+  font-weight: 500;
+  margin-left: 6px;
+  white-space: nowrap;
+}
+
+@media (prefers-color-scheme: dark) {
+  .hs-token-pct {
+    color: #888;
+  }
+}
+
+.hs-model-button-label.hs-fade {
+  mask-image: linear-gradient(to right, black 70%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, black 70%, transparent 100%);
+}
+
+/* ─── Audio Button ──────────────────────────────────────────────────── */
+
+.hs-audio-button {
+  background: #1a1a1a;
+  color: white;
+  border-radius: 50%;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.hs-audio-button:hover {
+  background: #333;
+  color: white;
+}
+
+/* ─── Menu Container ────────────────────────────────────────────────── */
+
+.hs-menu-container {
+  position: relative;
+}
+
+/* ─── Dropdown Menu ─────────────────────────────────────────────────── */
+
+.hs-dropdown-menu {
+  position: fixed;
+  background: white;
+  border-radius: 12px;
+  box-shadow:
+    0 4px 24px rgba(0, 0, 0, 0.12),
+    0 0 0 1px rgba(0, 0, 0, 0.04);
+  min-width: 240px;
+  z-index: 9999;
+  animation: hs-menu-in 0.15s ease-out;
+}
+
+.hs-dropdown-menu::-webkit-scrollbar {
+  width: 5px;
+}
+
+.hs-dropdown-menu::-webkit-scrollbar-thumb {
+  background: #ccc;
+  border-radius: 3px;
+}
+
+.hs-dropdown-menu::-webkit-scrollbar-thumb:hover {
+  background: #aaa;
+}
+
+@keyframes hs-menu-in {
+  from { opacity: 0; transform: translateY(4px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* ─── Menu States ───────────────────────────────────────────────────── */
+
+.hs-menu-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  font-size: 13px;
+  color: #999;
+  justify-content: center;
+}
+
+/* ─── Menu Items ────────────────────────────────────────────────────── */
+
+.hs-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 16px;
+  cursor: pointer;
+  transition: background-color 0.12s ease;
+}
+
+.hs-menu-item:hover {
+  background: #f8f8f8;
+}
+
+.hs-menu-item-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  color: #666;
+}
+
+.hs-menu-item-label {
+  flex: 1;
+  font-size: 14px;
+  color: #333;
+}
+
+.hs-menu-item-arrow {
+  display: flex;
+  align-items: center;
+  color: #bbb;
+}
+
+/* ─── Model Items ───────────────────────────────────────────────────── */
+
+.hs-model-item {
+  padding: 10px 16px;
+}
+
+.hs-model-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  color: #666;
+}
+
+.hs-model-name {
+  flex: 1;
+  font-size: 14px;
+  color: #333;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.hs-model-item svg:last-child {
+  color: #bbb;
+  margin-left: auto;
+}
+
+.hs-model-item {
+  cursor: pointer;
+}
+
+.hs-model-selected {
+  background: #f0f0ff;
+  color: #6366f1;
+}
+
+.hs-model-selected .hs-model-name {
+  color: #6366f1;
+  font-weight: 600;
+}
+
+/* ─── Menu Empty / Error ────────────────────────────────────────────── */
+
+.hs-menu-empty {
+  padding: 12px 16px;
+  font-size: 13px;
+  color: #999;
+  text-align: center;
+}
+
+/* ─── Spinner ───────────────────────────────────────────────────────── */
+
+.hs-spin {
+  animation: hs-spin-keyframe 0.8s linear infinite;
+}
+
+@keyframes hs-spin-keyframe {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* ─── Pro Badge ─────────────────────────────────────────────────────── */
+
+.hs-pro-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 6px;
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  color: white;
+  font-size: 10px;
+  font-weight: 600;
+  border-radius: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+/* ─── Suggestions ───────────────────────────────────────────────────── */
+
+.hs-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 20px;
+  justify-content: center;
+  z-index: 1;
+  position: relative;
+  max-width: 640px;
+}
+
+.hs-suggestion-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 8px 16px;
+  background: rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  border-radius: 20px;
+  font-size: 13px;
+  font-weight: 500;
+  color: #555;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.hs-suggestion-chip:hover {
+  background: rgba(255, 255, 255, 0.95);
+  border-color: rgba(99, 102, 241, 0.3);
+  color: #6366f1;
+  box-shadow: 0 2px 8px rgba(99, 102, 241, 0.1);
+}
+
+/* ─── Light Mode Overrides ──────────────────────────────────────────── */
+
+@media (prefers-color-scheme: light) {
+  .hs-container { background-color: #f8f8f8; }
+  .hs-logo { color: #1a1a1a; }
+  .hs-search-form { background: white; }
+  .hs-search-input { color: #1a1a1a; }
+  .hs-search-input::placeholder { color: #aaa; }
+  .hs-search-controls { border-top-color: #f0f0f0; }
+  .hs-control-button, .hs-control-button-with-text { color: #666; }
+  .hs-control-button:hover, .hs-control-button-with-text:hover { background: #f5f5f5; color: #333; }
+  .hs-dropdown-menu { background: white; }
+  .hs-menu-loading { color: #888; }
+  .hs-menu-item:hover { background: #f8f8f8; }
+  .hs-menu-item-icon { color: #666; }
+  .hs-menu-item-label { color: #333; }
+  .hs-model-icon { color: #666; }
+  .hs-model-name { color: #333; }
+}
+
+/* ─── Dark Mode Overrides ───────────────────────────────────────────── */
+
+@media (prefers-color-scheme: dark) {
+  .hs-container { background-color: #0f0f1a; }
+  .hs-logo { color: #eee; }
+  .hs-tagline { color: #888; }
+  .hs-search-form { background: #1e1e2e; }
+  .hs-search-input { color: #eee; }
+  .hs-search-input::placeholder { color: #666; }
+  .hs-search-controls { border-top-color: #2a2a3e; }
+  .hs-control-button, .hs-control-button-with-text { color: #999; }
+  .hs-control-button:hover, .hs-control-button-with-text:hover { background: #2a2a3e; color: #ddd; }
+  .hs-audio-button { background: #eee; color: #1a1a1a; }
+  .hs-audio-button:hover { background: #ccc; color: #1a1a1a; }
+  .hs-dropdown-menu { background: #1e1e2e; box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(255, 255, 255, 0.06); }
+  .hs-dropdown-menu::-webkit-scrollbar-thumb { background: #444; }
+  .hs-dropdown-menu::-webkit-scrollbar-thumb:hover { background: #555; }
+  .hs-menu-loading { color: #888; }
+  .hs-menu-item:hover { background: #2a2a3e; }
+  .hs-menu-item-icon { color: #888; }
+  .hs-menu-item-label { color: #ddd; }
+  .hs-menu-item-arrow { color: #666; }
+  .hs-model-icon { color: #888; }
+  .hs-model-name { color: #ddd; }
+  .hs-model-item svg:last-child { color: #666; }
+  .hs-model-selected { background: rgba(99, 102, 241, 0.15); }
+  .hs-model-selected .hs-model-name { color: #818cf8; }
+  .hs-suggestion-chip { background: rgba(30, 30, 46, 0.7); border-color: rgba(255, 255, 255, 0.06); color: #aaa; }
+  .hs-suggestion-chip:hover { background: rgba(30, 30, 46, 0.95); border-color: rgba(99, 102, 241, 0.4); color: #818cf8; }
+}
+
+/* ─── Responsive ────────────────────────────────────────────────────── */
+
+@media (max-width: 700px) {
+  .hs-container { padding: 16px; }
+  .hs-logo { font-size: 26px; }
+  .hs-tagline { font-size: 13px; }
+  .hs-search-wrapper { max-width: 100%; }
+  .hs-search-controls { flex-wrap: wrap; gap: 6px; }
+  .hs-controls-left, .hs-controls-right { width: 100%; justify-content: center; }
+  .hs-suggestions { gap: 6px; }
+  .hs-suggestion-chip { font-size: 12px; padding: 6px 12px; }
+}
