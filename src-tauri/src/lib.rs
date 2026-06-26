@@ -286,7 +286,7 @@ async fn send_raw_to_session(
 
 /// Send a text prompt to a session.
 #[tauri::command]
-async fn send_message(
+async fn alayacore_send_message(
     session_id: String,
     text: String,
     sessions: State<'_, Sessions>,
@@ -298,7 +298,7 @@ async fn send_message(
 
 /// Send a multi-modal prompt (text + optional media) to a session.
 #[tauri::command]
-async fn send_prompt(
+async fn alayacore_send_prompt(
     session_id: String,
     text: String,
     media: Vec<MediaItem>,
@@ -350,7 +350,7 @@ async fn send_prompt(
 
 /// Switch the active model for a session.
 #[tauri::command]
-async fn set_model(
+async fn alayacore_model_set(
     session_id: String,
     model_id: u32,
     sessions: State<'_, Sessions>,
@@ -363,7 +363,7 @@ async fn set_model(
 
 /// Cancel the running task in a session.
 #[tauri::command]
-async fn cancel_task(
+async fn alayacore_cancel(
     session_id: String,
     sessions: State<'_, Sessions>,
 ) -> Result<(), String> {
@@ -374,7 +374,7 @@ async fn cancel_task(
 
 /// Save the session to a file (sends `:save <filename>` command).
 #[tauri::command]
-async fn save_session(
+async fn alayacore_save(
     session_id: String,
     filename: String,
     sessions: State<'_, Sessions>,
@@ -391,7 +391,7 @@ async fn save_session(
 
 /// Fork the session up to a history ID (sends `:fork <history_id> <filename>`).
 #[tauri::command]
-async fn fork_session(
+async fn alayacore_fork(
     session_id: String,
     history_id: String,
     filename: String,
@@ -403,9 +403,111 @@ async fn fork_session(
     send_raw_to_session(&map, &session_id, tlv::TAG_USER_END, "").await
 }
 
+/// Set reasoning level — sends `:reason <level>` (0=off, 1=normal, 2=max).
+#[tauri::command]
+async fn alayacore_reason(
+    session_id: String,
+    level: u32,
+    sessions: State<'_, Sessions>,
+) -> Result<(), String> {
+    let map = sessions.0.lock().await;
+    let cmd = format!(":reason {}", level);
+    send_raw_to_session(&map, &session_id, tlv::TAG_USER_TEXT, &cmd).await?;
+    send_raw_to_session(&map, &session_id, tlv::TAG_USER_END, "").await
+}
+
+/// Switch theme — sends `:theme_set <name>`.
+#[tauri::command]
+async fn alayacore_theme_set(
+    session_id: String,
+    name: String,
+    sessions: State<'_, Sessions>,
+) -> Result<(), String> {
+    let map = sessions.0.lock().await;
+    let cmd = format!(":theme_set {}", name);
+    send_raw_to_session(&map, &session_id, tlv::TAG_USER_TEXT, &cmd).await?;
+    send_raw_to_session(&map, &session_id, tlv::TAG_USER_END, "").await
+}
+
+/// Reload model configs — sends `:model_load`.
+#[tauri::command]
+async fn alayacore_model_load(
+    session_id: String,
+    sessions: State<'_, Sessions>,
+) -> Result<(), String> {
+    let map = sessions.0.lock().await;
+    send_raw_to_session(&map, &session_id, tlv::TAG_USER_TEXT, ":model_load").await?;
+    send_raw_to_session(&map, &session_id, tlv::TAG_USER_END, "").await
+}
+
+/// Apply edited model config — sends `:model_sync <config>`.
+#[tauri::command]
+async fn alayacore_model_sync(
+    session_id: String,
+    config: String,
+    sessions: State<'_, Sessions>,
+) -> Result<(), String> {
+    let map = sessions.0.lock().await;
+    let cmd = format!(":model_sync {}", config);
+    send_raw_to_session(&map, &session_id, tlv::TAG_USER_TEXT, &cmd).await?;
+    send_raw_to_session(&map, &session_id, tlv::TAG_USER_END, "").await
+}
+
+/// Set video FPS and resolution — sends `:video_config <fps> <0|1>`.
+#[tauri::command]
+async fn alayacore_video_config(
+    session_id: String,
+    fps: u32,
+    res: u32,
+    sessions: State<'_, Sessions>,
+) -> Result<(), String> {
+    let map = sessions.0.lock().await;
+    let cmd = format!(":video_config {} {}", fps, res);
+    send_raw_to_session(&map, &session_id, tlv::TAG_USER_TEXT, &cmd).await?;
+    send_raw_to_session(&map, &session_id, tlv::TAG_USER_END, "").await
+}
+
+/// Retry the last prompt — sends `:continue`.
+#[tauri::command]
+async fn alayacore_continue(
+    session_id: String,
+    sessions: State<'_, Sessions>,
+) -> Result<(), String> {
+    let map = sessions.0.lock().await;
+    send_raw_to_session(&map, &session_id, tlv::TAG_USER_TEXT, ":continue").await?;
+    send_raw_to_session(&map, &session_id, tlv::TAG_USER_END, "").await
+}
+
+/// Summarize conversation to reduce token usage — sends `:summarize`.
+/// ⚠️ Replaces entire conversation history with a summary.
+#[tauri::command]
+async fn alayacore_summarize(
+    session_id: String,
+    sessions: State<'_, Sessions>,
+) -> Result<(), String> {
+    let map = sessions.0.lock().await;
+    send_raw_to_session(&map, &session_id, tlv::TAG_USER_TEXT, ":summarize").await?;
+    send_raw_to_session(&map, &session_id, tlv::TAG_USER_END, "").await
+}
+
+/// Send a tool confirmation response — sends `:confirm <id> yes|no`.
+#[tauri::command]
+async fn alayacore_confirm(
+    session_id: String,
+    id: String,
+    allowed: bool,
+    sessions: State<'_, Sessions>,
+) -> Result<(), String> {
+    let map = sessions.0.lock().await;
+    let answer = if allowed { "yes" } else { "no" };
+    let cmd = format!(":confirm {} {}", id, answer);
+    send_raw_to_session(&map, &session_id, tlv::TAG_USER_TEXT, &cmd).await?;
+    send_raw_to_session(&map, &session_id, tlv::TAG_USER_END, "").await
+}
+
 /// Send a raw TLV frame to a session.
 #[tauri::command]
-async fn send_raw_frame(
+async fn alayacore_send_raw_frame(
     session_id: String,
     tag: String,
     value: String,
@@ -413,22 +515,6 @@ async fn send_raw_frame(
 ) -> Result<(), String> {
     let map = sessions.0.lock().await;
     send_raw_to_session(&map, &session_id, &tag, &value).await
-}
-
-/// Send a tool confirmation response to a session.
-#[tauri::command]
-async fn send_tool_confirm(
-    session_id: String,
-    id: String,
-    allowed: bool,
-    sessions: State<'_, Sessions>,
-) -> Result<(), String> {
-    let payload = serde_json::json!({
-        "type": "tool_confirm",
-        "data": { "id": id, "allowed": allowed }
-    });
-    let map = sessions.0.lock().await;
-    send_raw_to_session(&map, &session_id, tlv::TAG_SYSTEM_MSG, &payload.to_string()).await
 }
 
 /// Get stderr log for a session.
@@ -508,14 +594,21 @@ pub fn run() {
             close_session,
             list_sessions,
             session_connected,
-            send_message,
-            send_prompt,
-            set_model,
-            cancel_task,
-            save_session,
-            fork_session,
-            send_raw_frame,
-            send_tool_confirm,
+            alayacore_send_message,
+            alayacore_send_prompt,
+            alayacore_model_set,
+            alayacore_cancel,
+            alayacore_save,
+            alayacore_fork,
+            alayacore_reason,
+            alayacore_theme_set,
+            alayacore_model_load,
+            alayacore_model_sync,
+            alayacore_video_config,
+            alayacore_continue,
+            alayacore_summarize,
+            alayacore_confirm,
+            alayacore_send_raw_frame,
             get_stderr_log,
             list_models,
         ])

@@ -484,7 +484,7 @@ function App() {
     setSessions((prev) => prev.map((s) => s.id === activeId ? { ...s, input: "", staged: [], statusMsg: "Sending…" } : s));
 
     try {
-      await invoke("send_prompt", { sessionId: activeId, text, media: mediaItems });
+      await invoke("alayacore_send_prompt", { sessionId: activeId, text, media: mediaItems });
       setSessions((prev) => prev.map((s) => s.id === activeId ? { ...s, statusMsg: "Waiting for response…" } : s));
     } catch (err) {
       setSessions((prev) => prev.map((s) => s.id === activeId ? { ...s, statusMsg: `Send error: ${err}`, messages: [...s.messages, { id: `err-${Date.now()}`, role: "system" as const, content: `⚠ Send error: ${err}` }] } : s));
@@ -501,7 +501,7 @@ function App() {
     if (!activeId) return;
     try {
       setSessions((prev) => prev.map((s) => s.id === activeId ? { ...s, statusMsg: "Cancelling…" } : s));
-      await invoke("cancel_task", { sessionId: activeId });
+      await invoke("alayacore_cancel", { sessionId: activeId });
     } catch (err) {
       setSessions((prev) => prev.map((s) => s.id === activeId ? { ...s, statusMsg: `Cancel error: ${err}` } : s));
     }
@@ -519,7 +519,7 @@ function App() {
     const name = prompt("Save session as:", `session-${Date.now()}.md`);
     if (!name) return;
     try {
-      await invoke("save_session", { sessionId: activeId, filename: name });
+      await invoke("alayacore_save", { sessionId: activeId, filename: name });
       setSessions((prev) => prev.map((s) => s.id === activeId ? { ...s, statusMsg: `Saving to ${name}…` } : s));
     } catch (err) {
       setSessions((prev) => prev.map((s) => s.id === activeId ? { ...s, statusMsg: `Save error: ${err}` } : s));
@@ -533,7 +533,7 @@ function App() {
     const name = prompt("Fork to filename:", `fork-${Date.now()}.md`);
     if (!name) return;
     try {
-      await invoke("fork_session", { sessionId: activeId, historyId: historyId.trim(), filename: name });
+      await invoke("alayacore_fork", { sessionId: activeId, historyId: historyId.trim(), filename: name });
       setSessions((prev) => prev.map((s) => s.id === activeId ? { ...s, statusMsg: `Forking to ${name}…` } : s));
     } catch (err) {
       setSessions((prev) => prev.map((s) => s.id === activeId ? { ...s, statusMsg: `Fork error: ${err}` } : s));
@@ -544,9 +544,83 @@ function App() {
     if (!activeId) return;
     try {
       setSessions((prev) => prev.map((s) => s.id === activeId ? { ...s, statusMsg: "Switching model…" } : s));
-      await invoke("set_model", { sessionId: activeId, modelId });
+      await invoke("alayacore_model_set", { sessionId: activeId, modelId });
     } catch (err) {
       setSessions((prev) => prev.map((s) => s.id === activeId ? { ...s, statusMsg: `Model switch failed: ${err}` } : s));
+    }
+  }, [activeId]);
+
+  const handleReason = useCallback(async (level: number) => {
+    if (!activeId) return;
+    try {
+      await invoke("alayacore_reason", { sessionId: activeId, level });
+    } catch (err) {
+      console.error("Reason error:", err);
+    }
+  }, [activeId]);
+
+  const handleThemeSet = useCallback(async (name: string) => {
+    if (!activeId) return;
+    try {
+      await invoke("alayacore_theme_set", { sessionId: activeId, name });
+    } catch (err) {
+      console.error("Theme set error:", err);
+    }
+  }, [activeId]);
+
+  const handleModelLoad = useCallback(async () => {
+    if (!activeId) return;
+    try {
+      await invoke("alayacore_model_load", { sessionId: activeId });
+    } catch (err) {
+      console.error("Model load error:", err);
+    }
+  }, [activeId]);
+
+  const handleModelSync = useCallback(async (config: string) => {
+    if (!activeId) return;
+    try {
+      await invoke("alayacore_model_sync", { sessionId: activeId, config });
+    } catch (err) {
+      console.error("Model sync error:", err);
+    }
+  }, [activeId]);
+
+  const handleVideoConfig = useCallback(async (fps: number, res: number) => {
+    if (!activeId) return;
+    try {
+      await invoke("alayacore_video_config", { sessionId: activeId, fps, res });
+    } catch (err) {
+      console.error("Video config error:", err);
+    }
+  }, [activeId]);
+
+  const handleContinue = useCallback(async () => {
+    if (!activeId) return;
+    try {
+      await invoke("alayacore_continue", { sessionId: activeId });
+      setSessions((prev) => prev.map((s) => s.id === activeId ? { ...s, statusMsg: "Continuing…" } : s));
+    } catch (err) {
+      setSessions((prev) => prev.map((s) => s.id === activeId ? { ...s, statusMsg: `Continue error: ${err}` } : s));
+    }
+  }, [activeId]);
+
+  const handleSummarize = useCallback(async () => {
+    if (!activeId) return;
+    try {
+      await invoke("alayacore_summarize", { sessionId: activeId });
+      setSessions((prev) => prev.map((s) => s.id === activeId ? { ...s, statusMsg: "Summarizing…" } : s));
+    } catch (err) {
+      setSessions((prev) => prev.map((s) => s.id === activeId ? { ...s, statusMsg: `Summarize error: ${err}` } : s));
+    }
+  }, [activeId]);
+
+  const handleToolConfirm = useCallback(async (id: string, allowed: boolean) => {
+    if (!activeId) return;
+    try {
+      await invoke("alayacore_confirm", { sessionId: activeId, id, allowed });
+    } catch (err) {
+      console.error("Confirm error:", err);
     }
   }, [activeId]);
 
