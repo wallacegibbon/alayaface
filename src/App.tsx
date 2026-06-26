@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useReducer } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   type DeltaEvent,
   type FrameEvent,
@@ -126,8 +127,9 @@ function App() {
     activeId: null,
     pendingUpdates: new Map(),
   });
-  const [showLogs, setShowLogs] = useState(false);
   const [showUrlModal, setShowUrlModal] = useState<string | false>(false);
+  const [isMaximized, setIsMaximized] = useState(false);
+  const [collapsedMsgs, setCollapsedMsgs] = useState<Set<string>>(new Set());
   const [showUploadMenu, setShowUploadMenu] = useState(false);
   const [showModelMenu, setShowModelMenu] = useState(false);
   const [initializing, setInitializing] = useState(true);
@@ -204,9 +206,10 @@ function App() {
               // Same turn — append to existing user message
               const newMsgs = [...s.messages];
               if (tag === "UT") {
+                const sep = lastMsg!.content ? '\n\n' : '';
                 newMsgs[newMsgs.length - 1] = {
                   ...lastMsg!,
-                  content: (lastMsg!.content || "") + textContent,
+                  content: lastMsg!.content + sep + textContent,
                   history_id: history_id || lastMsg!.history_id,
                 };
               } else if (mediaType) {
@@ -304,7 +307,16 @@ function App() {
             const toolName = tc?.name || "Tool";
             const newMsgs = [...newS.messages];
             const idx = newMsgs.findIndex((m) => m.tool_id === toolId);
-            if (idx >= 0) newMsgs[idx] = { ...newMsgs[idx], content: isError ? `❌ **${toolName}** (error)\n\`\`\`\n${outStr}\n\`\`\`` : `✅ **${toolName}**\n\`\`\`\n${outStr}\n\`\`\``, is_error: isError, history_id: history_id || newMsgs[idx].history_id };
+            if (idx >= 0) {
+              const existing = newMsgs[idx].content;
+              const prefix = isError ? `❌ **${toolName}** (error)` : `✅ **${toolName}**`;
+              // Keep existing input content and append output
+              const inputPart = existing.split("\n").slice(1).join("\n").trim();
+              const newContent = inputPart
+                ? `${prefix}\n\nInput:\n\`\`\`\n${inputPart}\n\`\`\`\n\nOutput:\n\`\`\`\n${outStr}\n\`\`\``
+                : `${prefix}\n\`\`\`\n${outStr}\n\`\`\``;
+              newMsgs[idx] = { ...newMsgs[idx], content: newContent, is_error: isError, history_id: history_id || newMsgs[idx].history_id };
+            }
             return { ...newS, messages: newMsgs };
           }
 
@@ -353,6 +365,51 @@ function App() {
     return () => { cancelled = true; };
   }, []);
 
+  // ─── Initialize maximized state ─────────────────────────────────────
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    (async () => {
+      try {
+        setIsMaximized(await getCurrentWindow().isMaximized());
+        unlisten = await getCurrentWindow().onResized(() => {
+          getCurrentWindow().isMaximized().then(setIsMaximized);
+        });
+      } catch { /* */ }
+    })();
+    return () => { unlisten?.(); };
+  }, []);
+
+  // ─── Window dragging via callback ref ────────────────────────────────
+  const headerRef = useCallback((el: HTMLElement | null) => {
+    if (!el) return;
+    const onMouseDown = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (target.closest('button, .tab, .tab-close, .tab-new, .win-btn')) return;
+      getCurrentWindow().startDragging();
+    };
+    el.addEventListener('mousedown', onMouseDown);
+    return () => el.removeEventListener('mousedown', onMouseDown);
+  }, []);
+
+  // ─── Auto-collapse completed tool calls ─────────────────────────────
+  useEffect(() => {
+    if (!activeSess) return;
+    const toolIds = new Set<string>();
+    for (const msg of activeSess.messages) {
+      if (msg.role === "tool" && msg.tool_id && !msg.content.startsWith("🔧")) {
+        toolIds.add(msg.id);
+      }
+    }
+    setCollapsedMsgs(prev => {
+      const next = new Set(prev);
+      let changed = false;
+      for (const id of toolIds) {
+        if (!next.has(id)) { next.add(id); changed = true; }
+      }
+      return changed ? next : prev;
+    });
+  }, [activeSess?.messages]);
+
   // Scroll to bottom — only if user hasn't scrolled away
   const userScrolledAwayRef = useRef(false);
   const messagesContainerRef = useRef<HTMLDivElement | null>(null);
@@ -381,11 +438,8 @@ function App() {
 
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
-      if (ctxMenu) {
-        if (ctxMenuRef.current && !ctxMenuRef.current.contains(event.target as Node)) {
-          setCtxMenu(null);
-        }
-        return;
+      if (ctxMenu && ctxMenuRef.current && !ctxMenuRef.current.contains(event.target as Node)) {
+        setCtxMenu(null);
       }
       if (uploadMenuRef.current && !uploadMenuRef.current.contains(event.target as Node)) {
         setShowUploadMenu(false);
@@ -477,7 +531,7 @@ function App() {
     dispatch({ type: "UPDATE_SESSION", sessionId: activeId, updater: (s) => ({ ...s, staged: s.staged.filter((m) => m.id !== id) }) });
   }, [activeId]);
 
-  // ─── Send / Cancel / Clear ──────────────────────────────────────────
+  // ─── Send / Cancel ──────────────────────────────────────────────────
 
   const handleSend = useCallback(async () => {
     if (sendingRef.current || !activeSess) return;
@@ -524,23 +578,6 @@ function App() {
       await invoke("alayacore_cancel", { sessionId: activeId });
     } catch (err) {
       dispatch({ type: "UPDATE_SESSION", sessionId: activeId, updater: (s) => ({ ...s, statusMsg: `Cancel error: ${err}` }) });
-    }
-  }, [activeId]);
-
-  const handleClear = useCallback(() => {
-    if (!activeId) return;
-    dispatch({ type: "UPDATE_SESSION", sessionId: activeId, updater: () => createSessionState(activeId) });
-  }, [activeId]);
-
-  const handleSaveSession = useCallback(async () => {
-    if (!activeId) return;
-    const name = prompt("Save session as:", `session-${Date.now()}.md`);
-    if (!name) return;
-    try {
-      await invoke("alayacore_save", { sessionId: activeId, filename: name });
-      dispatch({ type: "UPDATE_SESSION", sessionId: activeId, updater: (s) => ({ ...s, statusMsg: `Saving to ${name}…` }) });
-    } catch (err) {
-      dispatch({ type: "UPDATE_SESSION", sessionId: activeId, updater: (s) => ({ ...s, statusMsg: `Save error: ${err}` }) });
     }
   }, [activeId]);
 
@@ -604,14 +641,6 @@ function App() {
   const handleModelClick = useCallback(() => {
     setShowModelMenu((prev) => !prev);
   }, []);
-
-  const fetchStderr = useCallback(async () => {
-    if (!activeId) return;
-    try {
-      const lines = await invoke<string[]>("get_stderr_log", { sessionId: activeId });
-      dispatch({ type: "UPDATE_SESSION", sessionId: activeId, updater: (s) => ({ ...s, stderrLines: lines }) });
-    } catch { /* */ }
-  }, [activeId]);
 
   // ─── Render helpers ─────────────────────────────────────────────────
 
@@ -723,17 +752,18 @@ function App() {
               {activeSess.contextLimit > 0 && (
                 <span className="hs-token-pct">{activeSess.contextTokens.toLocaleString()} / {activeSess.contextLimit.toLocaleString()}</span>
               )}
-              <button type="button" className="hs-control-button" title="Voice input">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
-                  <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-                  <line x1="12" y1="19" x2="12" y2="23"/>
-                  <line x1="8" y1="23" x2="16" y2="23"/>
+              <button
+                className={`hs-send-btn${activeSess.taskRunning ? ' cancel' : ''}`}
+                onClick={activeSess.taskRunning ? handleCancelTask : handleSend}
+                disabled={!activeSess.connected || (activeSess.taskRunning ? false : (!activeSess.input.trim() && activeSess.staged.length === 0))}
+                title={activeSess.taskRunning ? 'Cancel' : 'Send'}
+              >
+                <svg className="arrow" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="12" y1="20" x2="12" y2="4"/>
+                  <polyline points="6 10 12 4 18 10"/>
                 </svg>
-              </button>
-              <button type="button" className="hs-control-button hs-audio-button" title="Send">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-                  <polygon points="5 3 22 12 5 21 5 3" transform="rotate(90, 13.5, 12)"/>
+                <svg className="stop" width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                  <rect x="6" y="6" width="12" height="12" rx="2"/>
                 </svg>
               </button>
             </div>
@@ -775,11 +805,29 @@ function App() {
           <div className="hs-bg-orb hs-bg-orb-2" />
           <div className="hs-bg-orb hs-bg-orb-3" />
         </div>
-        <header className="app-header">
+        <header className="app-header" data-tauri-drag-region>
           <div className="header-top">
-            <h1>AlayaFace</h1>
-            <div className="connection-controls">
-              <button onClick={handleCreateSession} className="connect-btn">+ New Session</button>
+            <button onClick={handleCreateSession} className="connect-btn">+ New Session</button>
+            <div className="window-controls">
+              <button className="win-btn" onClick={() => getCurrentWindow().minimize()} title="Minimize">
+                <svg width="12" height="12" viewBox="0 0 12 12"><line x1="2" y1="6" x2="10" y2="6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
+              </button>
+              <button className="win-btn" onClick={() => {
+                  getCurrentWindow().toggleMaximize();
+                  setIsMaximized((v) => !v);
+                }} title={isMaximized ? "Restore" : "Maximize"}>
+                {isMaximized ? (
+                  <svg width="12" height="12" viewBox="0 0 12 12">
+                    <rect x="4" y="1" width="7" height="7" rx="0.8" fill="none" stroke="currentColor" strokeWidth="1.3"/>
+                    <rect x="1" y="4" width="7" height="7" rx="0.8" fill="none" stroke="currentColor" strokeWidth="1.3"/>
+                  </svg>
+                ) : (
+                  <svg width="12" height="12" viewBox="0 0 12 12"><rect x="2" y="2.5" width="8" height="7" rx="1" fill="none" stroke="currentColor" strokeWidth="1.3"/></svg>
+                )}
+              </button>
+              <button className="win-btn win-close" onClick={() => getCurrentWindow().close()} title="Close">
+                <svg width="12" height="12" viewBox="0 0 12 12"><line x1="3" y1="3" x2="9" y2="9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/><line x1="9" y1="3" x2="3" y2="9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
+              </button>
             </div>
           </div>
         </header>
@@ -815,19 +863,11 @@ function App() {
       {renderNotifications()}
 
       {/* Header */}
-      <header className="app-header">
+      <header className="app-header" ref={headerRef}>
         <div className="header-top">
-          <h1>AlayaFace</h1>
-          <div className="connection-controls">
-            <button onClick={handleCreateSession} className="connect-btn">+ New Session</button>
-            <button onClick={handleSaveSession} disabled={activeSess.messages.length === 0} className="save-btn" title="Save session to file">Save</button>
-            <button onClick={() => { setShowLogs(!showLogs); if (!showLogs) fetchStderr(); }} className="log-btn">Logs</button>
-          </div>
         </div>
-
-        {/* Tab bar */}
         {sessions.length > 0 && (
-          <div className="tab-bar">
+          <div className="tab-bar" data-tauri-drag-region>
             {sessions.map((s, i) => (
               <div key={s.id} className={`tab ${s.id === activeId ? "tab-active" : ""} ${!s.connected ? "tab-disconnected" : ""}`} onClick={() => switchSession(s.id)}>
                 <span className="tab-dot" />
@@ -835,99 +875,135 @@ function App() {
                 <button className="tab-close" onClick={(e) => { e.stopPropagation(); handleCloseSession(s.id); }} title="Close session">✕</button>
               </div>
             ))}
+            <button className="tab-new" onClick={handleCreateSession} title="New session">+</button>
+            <div className="window-controls">
+              <button className="win-btn" onClick={() => getCurrentWindow().minimize()} title="Minimize">
+                <svg width="12" height="12" viewBox="0 0 12 12"><line x1="2" y1="6" x2="10" y2="6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
+              </button>
+              <button className="win-btn" onClick={() => {
+                  getCurrentWindow().toggleMaximize();
+                  setIsMaximized((v) => !v);
+                }} title={isMaximized ? "Restore" : "Maximize"}>
+                {isMaximized ? (
+                  <svg width="12" height="12" viewBox="0 0 12 12">
+                    <rect x="4" y="1" width="7" height="7" rx="0.8" fill="none" stroke="currentColor" strokeWidth="1.3"/>
+                    <rect x="1" y="4" width="7" height="7" rx="0.8" fill="none" stroke="currentColor" strokeWidth="1.3"/>
+                  </svg>
+                ) : (
+                  <svg width="12" height="12" viewBox="0 0 12 12"><rect x="2" y="2.5" width="8" height="7" rx="1" fill="none" stroke="currentColor" strokeWidth="1.3"/></svg>
+                )}
+              </button>
+              <button className="win-btn win-close" onClick={() => getCurrentWindow().close()} title="Close">
+                <svg width="12" height="12" viewBox="0 0 12 12"><line x1="3" y1="3" x2="9" y2="9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/><line x1="9" y1="3" x2="3" y2="9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
+              </button>
+            </div>
           </div>
         )}
-
-        {activeSess && (
-          <div className={`status ${activeSess.connected ? "connected" : "disconnected"}`}>{activeSess.statusMsg}</div>
+        {sessions.length === 0 && (
+          <div className="header-top">
+            <button onClick={handleCreateSession} className="connect-btn">+ New Session</button>
+          </div>
         )}
       </header>
 
       {/* Chat area */}
       <div className={`chat-area ${activeSess.messages.length === 0 ? "chat-area-centered" : ""}`}>
-        {activeSess.messages.length === 0 ? (
-          /* ─── Empty state: just the input box ─── */
-          <div className="hs-container-inline">
-            {renderSearchBox()}
-          </div>
-        ) : (
-          /* ─── Messages + Input ─── */
+        {activeSess.messages.length > 0 && (
           <>
-            <div
-              ref={messagesContainerRef}
-              className="messages"
-            >
-              {activeSess.messages.map((msg) => (
+          <div
+            ref={messagesContainerRef}
+            className="messages"
+          >
+            {activeSess.messages.map((msg) => (
+              msg.role === "reasoning" ? (
+                <div key={msg.id} className="message-reasoning-wrap">
+                  <div className="reasoning-header" onClick={() => {
+                    const lines = msg.content.split("\n").length;
+                    if (lines <= 2) return;
+                    const next = new Set(collapsedMsgs);
+                    if (next.has(msg.id)) next.delete(msg.id); else next.add(msg.id);
+                    setCollapsedMsgs(next);
+                  }}>
+                      {msg.content.split("\n").length > 2 && (
+                        <span className="reasoning-toggle">{collapsedMsgs.has(msg.id) ? '▶' : '▼'}</span>
+                      )}
+                      {msg.content.split("\n").length <= 2 && (
+                        <span className="reasoning-toggle">▼</span>
+                      )}
+                      <span className="reasoning-label">Reasoning</span>
+                    </div>
+                    <div className={`message message-reasoning${msg.content.split("\n").length > 2 && collapsedMsgs.has(msg.id) ? ' reasoning-collapsed' : ''}`}
+                         onClick={() => {
+                           if (collapsedMsgs.has(msg.id)) {
+                             const next = new Set(collapsedMsgs);
+                             next.delete(msg.id);
+                             setCollapsedMsgs(next);
+                           }
+                         }}
+                    >
+                      {msg.content.split("\n").map((line, i) => <span key={i}>{line}{i < msg.content.split("\n").length - 1 && <br />}</span>)}
+                    </div>
+                  </div>
+                ) : msg.role === "tool" ? (
+                  <div key={msg.id} className="message-reasoning-wrap">
+                    <div className="reasoning-header" onClick={() => {
+                      const next = new Set(collapsedMsgs);
+                      if (next.has(msg.id)) next.delete(msg.id); else next.add(msg.id);
+                      setCollapsedMsgs(next);
+                    }}>
+                      <span className="reasoning-toggle">{collapsedMsgs.has(msg.id) ? '▶' : '▼'}</span>
+                      <span className={`tool-icon ${msg.is_error ? 'tool-error' : 'tool-ok'}`}>{msg.is_error ? '✗' : '✓'}</span>
+                      <span className="reasoning-label">{msg.tool_name || "Tool"}</span>
+                    </div>
+                    {!collapsedMsgs.has(msg.id) && (
+                      <div className="message-tool-content">
+                        {(() => { const lines = msg.content.split("\n"); return lines.slice(1).join("\n"); })()}
+                      </div>
+                    )}
+                  </div>
+                ) : (
                 <div
                   key={msg.id}
                   className={`message message-${msg.role}${msg.history_id ? " message-has-ctx" : ""}`}
                   onContextMenu={(e) => {
-                    if (msg.history_id) {
-                      e.preventDefault();
-                      setCtxMenu({ x: e.clientX, y: e.clientY, message: msg });
-                    }
+                    e.preventDefault();
+                    console.log('ctxMenu position:', e.clientX, e.clientY);
+                    setCtxMenu({ x: e.clientX, y: e.clientY, message: msg });
                   }}
                 >
-                  <div className="message-header">
-                    {msg.role === "user" && "🧑 You"}
-                    {msg.role === "assistant" && "🤖 Assistant"}
-                    {msg.role === "reasoning" && "🧠 Reasoning"}
-                    {msg.role === "tool" && "🛠 Tool"}
-                    {msg.role === "system" && "ℹ System"}
-                  </div>
                   <div className="message-content">
                     {msg.role === "user" ? renderUserContent(msg) : msg.content.split("\n").map((line, i) => <span key={i}>{line}{i < msg.content.split("\n").length - 1 && <br />}</span>)}
                   </div>
                 </div>
+                )
               ))}
-              {/* Blinking cursor when awaiting response or processing */}
-              {(activeSess.sendPending || Array.from(activeSess.historyContents.entries()).length > 0) && (
+              {/* Blinking cursor when awaiting response */}
+              {activeSess.sendPending && (
                 <div className="message message-assistant cursor-blink">▊</div>
               )}
               <div ref={messagesEndRef} />
             </div>
-
-            {/* Input area styled as HomeScreen search box */}
-            <div className="session-input-bar">
-              {renderSearchBox()}
-              <div className="session-input-actions">
-                <button onClick={handleSend} disabled={!activeSess.connected || activeSess.taskRunning || (!activeSess.input.trim() && activeSess.staged.length === 0)} className="send-btn">Send</button>
-                <button onClick={handleCancelTask} disabled={!activeSess.taskRunning} className="cancel-btn">Cancel</button>
-                <button onClick={handleClear} disabled={activeSess.messages.length === 0 && activeSess.staged.length === 0} className="clear-btn">Clear</button>
-              </div>
-            </div>
           </>
         )}
+        {/* Input bar — same element, class toggles centered/bottom */}
+        <div className={`session-input-bar${activeSess.messages.length === 0 ? ' session-input-bar-centered' : ''}`}>
+          {renderSearchBox()}
+        </div>
       </div>
 
       {/* Context menu */}
       {ctxMenu && (
-        <div
-          ref={ctxMenuRef}
-          className="ctx-menu"
-          style={{ left: ctxMenu.x, top: ctxMenu.y }}
-        >
+        <div className="ctx-overlay">
           <div
-            className="ctx-menu-item"
-            onClick={() => {
-              handleForkMessage(ctxMenu.message);
-              setCtxMenu(null);
-            }}
+            ref={ctxMenuRef}
+            className="ctx-menu"
+            style={{ left: ctxMenu.x, top: ctxMenu.y }}
           >
-            <span className="ctx-menu-icon">⎆</span>
-            <span>Fork up to here</span>
+            <div className="ctx-menu-item" onClick={() => { handleForkMessage(ctxMenu.message); setCtxMenu(null); }}>
+              <span className="ctx-menu-icon">⎆</span>
+              <span>Fork up to here</span>
+            </div>
           </div>
-        </div>
-      )}
-
-      {/* Log panel */}
-      {showLogs && activeSess && (
-        <div className="log-panel">
-          <div className="log-header">
-            <span>Stderr — Session {sessions.indexOf(activeSess) + 1}</span>
-            <button onClick={fetchStderr} className="refresh-btn">Refresh</button>
-          </div>
-          <pre className="log-content">{activeSess.stderrLines.length === 0 ? "(no output)" : activeSess.stderrLines.join("\n")}</pre>
         </div>
       )}
 

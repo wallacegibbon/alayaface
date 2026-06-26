@@ -13,8 +13,9 @@
     "windows": [
       {
         "title": "alayaface",
-        "width": 1200,
-        "height": 850
+        "width": 1400,
+        "height": 950,
+        "decorations": false
       }
     ],
     "security": {
