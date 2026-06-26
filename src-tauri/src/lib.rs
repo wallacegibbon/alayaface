@@ -39,7 +39,7 @@ pub struct FrameEvent {
     pub tag: String,
     pub raw_value: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub stream_id: Option<String>,
+    pub history_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -49,7 +49,7 @@ pub struct FrameEvent {
 #[derive(Debug, Clone, Serialize)]
 pub struct DeltaEvent {
     pub session_id: String,
-    pub stream_id: String,
+    pub history_id: String,
     pub content: String,
     pub tag: String,
 }
@@ -85,11 +85,11 @@ fn spawn_stdout_reader(
 
                     // Delta events (AT/AR)
                     if tag == "AT" || tag == "AR" {
-                        let (stream_id, content, has_delta) = tlv::unwrap_delta(raw_value);
+                        let (history_id, content, has_delta) = tlv::unwrap_delta(raw_value);
                         if has_delta {
                             let _ = app.emit("tlv-delta", DeltaEvent {
                                 session_id: sid.clone(),
-                                stream_id,
+                                history_id,
                                 content,
                                 tag: tag.clone(),
                             });
@@ -99,7 +99,7 @@ fn spawn_stdout_reader(
 
                     // Parse JSON payloads for AF/UF/SM
                     let mut json_val = None;
-                    let mut stream_id = None;
+                    let mut history_id = None;
                     let mut content = None;
 
                     if tag == "SM" {
@@ -112,7 +112,7 @@ fn spawn_stdout_reader(
                     } else if tag == "AF" || tag == "UF" {
                         let (sid_val, raw_content, has_delta) = tlv::unwrap_delta(raw_value);
                         if has_delta {
-                            stream_id = Some(sid_val);
+                            history_id = Some(sid_val);
                             content = Some(raw_content.clone());
                             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw_content) {
                                 json_val = Some(v);
@@ -124,7 +124,7 @@ fn spawn_stdout_reader(
                     } else {
                         let (sid_val, raw_content, has_delta) = tlv::unwrap_delta(raw_value);
                         if has_delta {
-                            stream_id = Some(sid_val);
+                            history_id = Some(sid_val);
                             content = Some(raw_content);
                         } else {
                             content = Some(raw_value.clone());
@@ -135,7 +135,7 @@ fn spawn_stdout_reader(
                         session_id: sid.clone(),
                         tag: tag.clone(),
                         raw_value: raw_value.clone(),
-                        stream_id,
+                        history_id,
                         content,
                         json: json_val,
                     });
@@ -337,7 +337,7 @@ async fn send_prompt(
         session_id: session_id.clone(),
         tag: "PROMPT".to_string(),
         raw_value: String::new(),
-        stream_id: None,
+        history_id: None,
         content: Some(display_text),
         json: Some(serde_json::json!({
             "text": text,

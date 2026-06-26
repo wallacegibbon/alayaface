@@ -91,10 +91,10 @@ pub fn write_frame<W: Write>(writer: &mut W, tag: &str, value: &str) -> io::Resu
 
 // ─── Delta Message Handling ─────────────────────────────────────────
 //
-// AT and AR deltas use NUL-delimited stream IDs:
-//   \x00<stream-id>\x00<content>
+// AT and AR deltas use NUL-delimited history IDs:
+//   \x00<history-id>\x00<content>
 //
-// Same stream ID → continuation; Different → new stream.
+// Same history ID → continuation; Different → new history block.
 
 /// Unwrap a delta value: split \x00<id>\x00<content> into (id, content).
 /// Returns (id, content, true) on success, or ("", full_value, false).
@@ -118,7 +118,7 @@ pub fn unwrap_delta(value: &str) -> (String, String, bool) {
     }
 }
 
-/// Wrap content with a NUL-delimited stream ID prefix: \x00<id>\x00<content>
+/// Wrap content with a NUL-delimited history ID prefix: \x00<id>\x00<content>
 pub fn wrap_delta(id: &str, content: &str) -> String {
     format!("\x00{}\x00{}", id, content)
 }

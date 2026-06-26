@@ -8,7 +8,7 @@ import "./components/HomeScreen.css";
 
 interface DeltaEvent {
   session_id: string;
-  stream_id: string;
+  history_id: string;
   content: string;
   tag: "AT" | "AR";
 }
@@ -17,7 +17,7 @@ interface FrameEvent {
   session_id: string;
   tag: string;
   raw_value: string;
-  stream_id: string | null;
+  history_id: string | null;
   content: string | null;
   json: Record<string, unknown> | null;
 }
@@ -45,7 +45,7 @@ interface Message {
   tool_id?: string;
   tool_name?: string;
   is_error?: boolean;
-  stream_id?: string;
+  history_id?: string;
   media?: MediaItem[];
 }
 
@@ -78,8 +78,8 @@ interface SessionState {
   taskRunning: boolean;
   contextTokens: number;
   contextLimit: number;
-  streamContents: Map<string, string>;
-  streamRoles: Map<string, "assistant" | "reasoning">;
+  historyContents: Map<string, string>;
+  historyRoles: Map<string, "assistant" | "reasoning">;
   toolCalls: Map<string, ToolCall>;
   stderrLines: string[];
   notifications: NotificationItem[];
@@ -161,8 +161,8 @@ function createSessionState(id: string): SessionState {
     taskRunning: false,
     contextTokens: 0,
     contextLimit: 0,
-    streamContents: new Map(),
-    streamRoles: new Map(),
+    historyContents: new Map(),
+    historyRoles: new Map(),
     toolCalls: new Map(),
     stderrLines: [],
     notifications: [],
@@ -262,23 +262,23 @@ function App() {
 
     const setup = async () => {
       const un1 = await listen<DeltaEvent>("tlv-delta", (ev) => {
-        const { session_id, stream_id, content, tag } = ev.payload;
+        const { session_id, history_id, content, tag } = ev.payload;
         const role = tag === "AT" ? "assistant" : "reasoning";
         setSessions((prev) => prev.map((s) => {
           if (s.id !== session_id) return s;
-          const existing = s.streamContents.get(stream_id);
-          const newStreamContents = new Map(s.streamContents);
+          const existing = s.historyContents.get(history_id);
+          const newHistoryContents = new Map(s.historyContents);
           const newMsgs = [...s.messages];
 
           if (existing !== undefined) {
-            newStreamContents.set(stream_id, existing + content);
-            const idx = newMsgs.findIndex((m) => m.stream_id === stream_id && m.role === role);
+            newHistoryContents.set(history_id, existing + content);
+            const idx = newMsgs.findIndex((m) => m.history_id === history_id && m.role === role);
             if (idx >= 0) newMsgs[idx] = { ...newMsgs[idx], content: existing + content };
           } else {
-            newStreamContents.set(stream_id, content);
-            newMsgs.push({ id: `stream-${stream_id}-${Date.now()}`, role, content, stream_id });
+            newHistoryContents.set(history_id, content);
+            newMsgs.push({ id: `hist-${history_id}-${Date.now()}`, role, content, history_id });
           }
-          return { ...s, streamContents: newStreamContents, messages: newMsgs };
+          return { ...s, historyContents: newHistoryContents, messages: newMsgs };
         }));
       });
       if (cancelled) { un1(); return; }
@@ -510,7 +510,7 @@ function App() {
   const handleClear = useCallback(() => {
     if (!activeId) return;
     setSessions((prev) => prev.map((s) => s.id === activeId ? {
-      ...s, messages: [], staged: [], streamContents: new Map(), streamRoles: new Map(), toolCalls: new Map(),
+      ...s, messages: [], staged: [], historyContents: new Map(), historyRoles: new Map(), toolCalls: new Map(),
     } : s));
   }, [activeId]);
 
@@ -838,8 +838,8 @@ function App() {
                   </div>
                 </div>
               ))}
-              {Array.from(activeSess.streamContents.entries()).filter(([_, c]) => c.length > 0).slice(-1).map(([sid]) => (
-                <div key={`cursor-${sid}`} className="message message-assistant cursor-blink">▊</div>
+              {Array.from(activeSess.historyContents.entries()).filter(([_, c]) => c.length > 0).slice(-1).map(([hid]) => (
+                <div key={`cursor-${hid}`} className="message message-assistant cursor-blink">▊</div>
               ))}
               <div ref={messagesEndRef} />
             </div>
