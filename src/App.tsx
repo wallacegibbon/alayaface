@@ -58,14 +58,18 @@ function App() {
     return () => el.removeEventListener('mousedown', onMouseDown);
   }, []);
 
-  // ─── Auto-collapse ──────────────────────────────────────────────────
+  // ─── Auto-collapse newly added messages ─────────────────────────────
   useEffect(() => {
-    if (!activeSess) return;
+    if (!activeSess || activeSess.messages.length === 0) return;
     const ids = new Set<string>();
-    for (const msg of activeSess.messages) {
+    // Only check the last few messages (new arrivals are at the end)
+    const startIdx = Math.max(0, activeSess.messages.length - 5);
+    for (let i = startIdx; i < activeSess.messages.length; i++) {
+      const msg = activeSess.messages[i];
       if (msg.role === "tool" && msg.tool_id && !msg.content.startsWith("🔧")) ids.add(msg.id);
       if (msg.role === "reasoning" && msg.content.split("\n").length > 2) ids.add(msg.id);
     }
+    if (ids.size === 0) return;
     setCollapsedMsgs(prev => {
       const next = new Set(prev);
       let changed = false;
