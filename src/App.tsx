@@ -938,7 +938,19 @@ function App() {
                            }
                          }}
                     >
-                      {msg.content.split("\n").map((line, i) => <span key={i}>{line}{i < msg.content.split("\n").length - 1 && <br />}</span>)}
+                      {(() => {
+                        const MAX_LINES = 3;
+                        const lines = msg.content.split("\n");
+                        if (collapsedMsgs.has(msg.id) && lines.length > MAX_LINES) {
+                          // Show only the last MAX_LINES when collapsed
+                          const tail = lines.slice(-MAX_LINES);
+                          return <>
+                            <span className="reasoning-truncated">…</span>
+                            {tail.map((line, i) => <span key={i}>{line}{i < tail.length - 1 && <br />}</span>)}
+                          </>;
+                        }
+                        return lines.map((line, i) => <span key={i}>{line}{i < lines.length - 1 && <br />}</span>);
+                      })()}
                     </div>
                   </div>
                 ) : msg.role === "tool" ? (

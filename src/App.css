@@ -686,22 +686,18 @@ html, body, #root {
   line-height: 1.5;
   background: transparent;
   border-left: none;
-  position: relative;
-  overflow: hidden;
 }
 
 .message-reasoning-wrap .message-reasoning.reasoning-collapsed {
-  max-height: 3em;
+  opacity: 0.65;
 }
-.message-reasoning-wrap .message-reasoning.reasoning-collapsed::after {
-  content: '';
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  height: 1.5em;
-  background: linear-gradient(transparent, #0f0f1a);
-  pointer-events: none;
+
+.message-reasoning-wrap .reasoning-truncated {
+  display: block;
+  color: #666;
+  font-size: 0.75rem;
+  letter-spacing: 0.1em;
+  margin-bottom: 2px;
 }
 
 @media (prefers-color-scheme: light) {
@@ -709,9 +705,7 @@ html, body, #root {
   .reasoning-header:hover { background: rgba(0, 0, 0, 0.02); }
   .reasoning-toggle { color: #aaa; }
   .message-reasoning-wrap .message-reasoning { color: #aaa; }
-  .message-reasoning-wrap .message-reasoning.reasoning-collapsed::after {
-    background: linear-gradient(transparent, #f8f8f8);
-  }
+  .message-reasoning-wrap .reasoning-truncated { color: #ccc; }
   .message-tool { color: #999; }
 }
 
