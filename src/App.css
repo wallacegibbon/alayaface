@@ -472,7 +472,7 @@ html, body, #root {
 
 /* ─── New Tab Button ───────────────────────────────────────────────── */
 
-.tab-new {
+.tab-new, .tab-btn {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -487,7 +487,7 @@ html, body, #root {
   transition: background 0.15s, color 0.15s;
   flex-shrink: 0;
 }
-.tab-new:hover { background: rgba(255, 255, 255, 0.1); color: #eee; }
+.tab-new:hover, .tab-btn:hover { background: rgba(255, 255, 255, 0.1); color: #eee; }
 
 /* ─── Model Selector ───────────────────────────────────────────────── */
 
@@ -1124,8 +1124,8 @@ html, body, #root {
   .tab-close { color: #999; }
   .tab-close:hover { color: #e94560; background: rgba(233,69,96,0.1); }
 
-  .tab-new { color: #888; }
-  .tab-new:hover { background: rgba(0, 0, 0, 0.06); color: #333; }
+  .tab-new, .tab-btn { color: #888; }
+  .tab-new:hover, .tab-btn:hover { background: rgba(0, 0, 0, 0.06); color: #333; }
 
   .message-input { background: white; color: #1a1a2e; border-color: #ccc; }
   .attach-btn { background: #ddd; border-color: #ccc; color: #555; }

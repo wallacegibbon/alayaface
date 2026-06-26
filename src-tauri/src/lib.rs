@@ -531,6 +531,87 @@ async fn create_session(
     Ok(session_id)
 }
 
+/// Resume an existing session from disk — starts alayacore with the
+/// session's session.md and config. Returns the session_id (same as the
+/// one on disk).
+#[tauri::command]
+async fn resume_session(
+    app: AppHandle,
+    session_id: String,
+    binary_path: String,
+    sessions: State<'_, Sessions>,
+    model_cache: State<'_, ModelCache>,
+) -> Result<String, String> {
+    let sessions_dir = alayaface_dir().join("sessions").join(&session_id);
+    let session_file = sessions_dir.join("session.md");
+    let config_dir = sessions_dir.join("config");
+
+    if !sessions_dir.exists() {
+        return Err(format!("Session directory not found: {:?}", sessions_dir));
+    }
+    if !session_file.exists() {
+        return Err(format!("Session file not found: {:?}", session_file));
+    }
+    if !config_dir.exists() {
+        return Err(format!("Config directory not found: {:?}", config_dir));
+    }
+
+    // Check if already running
+    {
+        let map = sessions.0.lock().await;
+        if map.contains_key(&session_id) {
+            return Err("Session is already active".to_string());
+        }
+    }
+
+    let bin = if binary_path.is_empty() {
+        alayacore::find_binary()
+    } else {
+        binary_path
+    };
+
+    let config_path = config_dir.to_string_lossy().to_string();
+    let session_path = session_file.to_string_lossy().to_string();
+
+    alog!("Resuming session {} from {:?}", &session_id, &session_file);
+
+    let proc = alayacore::spawn(&bin, &config_path, &session_path)
+        .map_err(|e| format!("Failed to start alayacore: {e}"))?;
+
+    let connected = Arc::new(AtomicBool::new(true));
+    let stderr_log = Arc::new(Mutex::new(Vec::new()));
+    let stdin = Arc::new(Mutex::new(proc.stdin));
+    let child = Arc::new(std::sync::Mutex::new(Some(proc.child)));
+
+    let handle = SessionHandle {
+        stdin: stdin.clone(),
+        connected: connected.clone(),
+        stderr_log: stderr_log.clone(),
+        child: child.clone(),
+        session_dir: sessions_dir,
+    };
+
+    sessions.0.lock().await.insert(session_id.clone(), handle);
+
+    spawn_stderr_collector(proc.stderr, stderr_log);
+    spawn_stdout_reader(
+        app.clone(),
+        session_id.clone(),
+        proc.stdout,
+        connected,
+        model_cache.0.clone(),
+        child.clone(),
+    );
+
+    let _ = app.emit("core-status", StatusEvent {
+        session_id: session_id.clone(),
+        connected: true,
+        message: format!("Resumed session ({})", bin),
+    });
+
+    Ok(session_id)
+}
+
 /// Close a session — kills the alayacore subprocess and removes it.
 #[tauri::command]
 async fn close_session(
@@ -1142,6 +1223,7 @@ pub fn run() {
         .manage(ModelCache(Arc::new(std::sync::Mutex::new(Vec::new()))))
         .invoke_handler(tauri::generate_handler![
             create_session,
+            resume_session,
             close_session,
             list_sessions,
             list_session_dirs,

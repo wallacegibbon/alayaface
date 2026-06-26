@@ -11,6 +11,7 @@ import {
 import { useSessions } from "./hooks/useSessions";
 import InputBar from "./components/InputBar";
 import UrlModal from "./components/UrlModal";
+import SessionManager from "./components/SessionManager";
 import "./App.css";
 import "./components/HomeScreen.css";
 
@@ -23,6 +24,7 @@ function App() {
   } = useSessions();
 
   const [showUrlModal, setShowUrlModal] = useState<string | false>(false);
+  const [showSessionManager, setShowSessionManager] = useState(false);
   const [isMaximized, setIsMaximized] = useState(false);
   const [collapsedMsgs, setCollapsedMsgs] = useState<Set<string>>(new Set());
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; message: Message } | null>(null);
@@ -307,6 +309,7 @@ function App() {
               </div>
             ))}
             <button className="tab-new" onClick={handleCreateSession} title="New session">+</button>
+            <button className="tab-btn" onClick={() => setShowSessionManager(true)} title="Session manager">☰</button>
             <div className="window-controls">
               <button className="win-btn" onClick={() => getCurrentWindow().minimize()} title="Minimize">
                 <svg width="12" height="12" viewBox="0 0 12 12"><line x1="2" y1="6" x2="10" y2="6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
@@ -418,6 +421,18 @@ function App() {
       )}
 
       {showUrlModal && <UrlModal initialType={typeof showUrlModal === "string" ? showUrlModal : "image"} onClose={() => setShowUrlModal(false)} onConfirm={handleConfirmUrl} />}
+
+      {showSessionManager && (
+        <SessionManager
+          onOpenSession={(id) => {
+            switchSession(id);
+            setShowSessionManager(false);
+          }}
+          onNewSession={handleCreateSession}
+          onClose={() => setShowSessionManager(false)}
+          activeSessionIds={sessions.map((s) => s.id)}
+        />
+      )}
     </div>
   );
 }
