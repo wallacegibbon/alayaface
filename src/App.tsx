@@ -394,16 +394,19 @@ function App() {
   // ─── Auto-collapse completed tool calls ─────────────────────────────
   useEffect(() => {
     if (!activeSess) return;
-    const toolIds = new Set<string>();
+    const ids = new Set<string>();
     for (const msg of activeSess.messages) {
       if (msg.role === "tool" && msg.tool_id && !msg.content.startsWith("🔧")) {
-        toolIds.add(msg.id);
+        ids.add(msg.id);
+      }
+      if (msg.role === "reasoning" && msg.content.split("\n").length > 2) {
+        ids.add(msg.id);
       }
     }
     setCollapsedMsgs(prev => {
       const next = new Set(prev);
       let changed = false;
-      for (const id of toolIds) {
+      for (const id of ids) {
         if (!next.has(id)) { next.add(id); changed = true; }
       }
       return changed ? next : prev;
