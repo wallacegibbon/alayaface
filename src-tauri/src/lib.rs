@@ -12,11 +12,169 @@ mod tlv;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex;
 use uuid::Uuid;
+
+// Use eprintln for logging since Tauri may not set up `log` crate properly
+macro_rules! alog {
+    ($($arg:tt)*) => {
+        eprintln!("[alayaface] {}", format_args!($($arg)*))
+    };
+}
+
+// ─── Directory Management ────────────────────────────────────────────
+
+/// Default model config template — in key-value block format (alayacore's
+/// custom format, NOT TOML/JSON). Written to `~/.alayaface/config/model.conf`
+/// on first run when `~/.alayacore/` is not available.
+///
+/// Format per model block:
+///   name: "..."
+///   protocol_type: "..."
+///   base_url: "..."
+///   api_key: "..."
+///   model_name: "..."
+///   context_limit: <int>
+///   max_tokens: <int>
+///
+/// Multiple blocks are separated by blank lines.
+const DEFAULT_MODEL_CONF: &str = r##"name: "Placeholder"
+protocol_type: "openai"
+base_url: "https://api.openai.com/v1"
+api_key: ""
+model_name: "gpt-4o"
+context_limit: 128000
+max_tokens: 4096
+"##;
+
+/// Get alayaface's base directory (~/.alayaface).
+fn alayaface_dir() -> PathBuf {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE")) // Windows
+        .unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".alayaface")
+}
+
+/// Ensure `~/.alayaface/` exists with default config template.
+/// Creates directories and default files if missing.
+///
+/// Initialization logic (first run):
+/// 1. If `~/.alayacore/` exists → copy its config files as initial template
+/// 2. Otherwise → write hardcoded minimal defaults
+///
+/// Returns `(config_template_dir, sessions_dir)`.
+fn ensure_alayaface_dirs() -> Result<(PathBuf, PathBuf), String> {
+    let base = alayaface_dir();
+    let config = base.join("config");
+    let sessions = base.join("sessions");
+
+    std::fs::create_dir_all(&config)
+        .map_err(|e| format!("Cannot create {:?}: {}", config, e))?;
+    std::fs::create_dir_all(&sessions)
+        .map_err(|e| format!("Cannot create {:?}: {}", sessions, e))?;
+
+    // Check if template config is empty (no model.conf) — first run
+    let model_conf = config.join("model.conf");
+    if !model_conf.exists() {
+        // Try to copy from ~/.alayacore/ first
+        let alayacore_dir = {
+            let home = std::env::var("HOME")
+                .or_else(|_| std::env::var("USERPROFILE"))
+                .unwrap_or_else(|_| ".".to_string());
+            PathBuf::from(home).join(".alayacore")
+        };
+
+        if alayacore_dir.exists() {
+            // Copy model.conf, runtime.conf, themes/ from alayacore's config
+            let src_model = alayacore_dir.join("model.conf");
+            if src_model.exists() {
+                std::fs::copy(&src_model, &model_conf)
+                    .map_err(|e| format!("Cannot copy {:?} → {:?}: {}", src_model, model_conf, e))?;
+            } else {
+                std::fs::write(&model_conf, DEFAULT_MODEL_CONF)
+                    .map_err(|e| format!("Cannot write {:?}: {}", model_conf, e))?;
+            }
+
+            let src_runtime = alayacore_dir.join("runtime.conf");
+            let runtime_conf = config.join("runtime.conf");
+            if src_runtime.exists() {
+                std::fs::copy(&src_runtime, &runtime_conf)
+                    .map_err(|e| format!("Cannot copy {:?}: {}", src_runtime, e))?;
+            } else {
+                std::fs::write(&runtime_conf, "{}")
+                    .map_err(|e| format!("Cannot write {:?}: {}", runtime_conf, e))?;
+            }
+
+            let src_themes = alayacore_dir.join("themes");
+            let dst_themes = config.join("themes");
+            if src_themes.exists() {
+                copy_dir(&src_themes, &dst_themes)?;
+            } else {
+                std::fs::create_dir_all(&dst_themes)
+                    .map_err(|e| format!("Cannot create {:?}: {}", dst_themes, e))?;
+            }
+        } else {
+            // No ~/.alayacore — write hardcoded defaults
+            std::fs::write(&model_conf, DEFAULT_MODEL_CONF)
+                .map_err(|e| format!("Cannot write {:?}: {}", model_conf, e))?;
+
+            let runtime_conf = config.join("runtime.conf");
+            std::fs::write(&runtime_conf, "{}")
+                .map_err(|e| format!("Cannot write {:?}: {}", runtime_conf, e))?;
+
+            let themes = config.join("themes");
+            std::fs::create_dir_all(&themes)
+                .map_err(|e| format!("Cannot create {:?}: {}", themes, e))?;
+        }
+    }
+
+    Ok((config, sessions))
+}
+
+/// Copy template config into a session directory.
+/// Source: `~/.alayaface/config/` → Dest: `~/.alayaface/sessions/<uuid>/config/`
+/// Also creates an empty `session.md` file.
+fn create_session_dir(sessions_dir: &PathBuf, uuid: &str) -> Result<PathBuf, String> {
+    let session_dir = sessions_dir.join(uuid);
+    let dst_config = session_dir.join("config");
+    let session_file = session_dir.join("session.md");
+
+    // Copy template config
+    let template = sessions_dir
+        .parent()
+        .map(|p| p.join("config"))
+        .unwrap_or_else(|| alayaface_dir().join("config"));
+
+    copy_dir(&template, &dst_config)?;
+
+    // Create empty session file
+    std::fs::write(&session_file, "")
+        .map_err(|e| format!("Cannot create {:?}: {}", session_file, e))?;
+
+    Ok(session_dir)
+}
+
+/// Recursively copy a directory (cross-platform, no symlinks).
+fn copy_dir(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(dst)
+        .map_err(|e| format!("Cannot create {:?}: {}", dst, e))?;
+    for entry in std::fs::read_dir(src).map_err(|e| format!("Cannot read {:?}: {}", src, e))? {
+        let entry = entry.map_err(|e| format!("Read error: {}", e))?;
+        let ty = entry.file_type().map_err(|e| format!("Stat error: {}", e))?;
+        let name = entry.file_name();
+        if ty.is_dir() {
+            copy_dir(&entry.path(), &dst.join(&name))?;
+        } else {
+            std::fs::copy(&entry.path(), &dst.join(&name))
+                .map_err(|e| format!("Copy error: {}", e))?;
+        }
+    }
+    Ok(())
+}
 
 // ─── Session Handle ──────────────────────────────────────────────────
 
@@ -24,12 +182,47 @@ struct SessionHandle {
     stdin: Arc<Mutex<std::process::ChildStdin>>,
     connected: Arc<AtomicBool>,
     stderr_log: Arc<Mutex<Vec<String>>>,
+    /// The child process — kept alive so we can explicitly kill it on close.
+    /// Uses std::sync::Mutex so Drop can access it (Drop runs in sync context).
+    child: Arc<std::sync::Mutex<Option<std::process::Child>>>,
+    /// Path to the session's directory on disk (~/.alayaface/sessions/<uuid>/).
+    #[allow(dead_code)]
+    session_dir: PathBuf,
+}
+
+impl Drop for SessionHandle {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.child.lock() {
+            if let Some(mut child) = guard.take() {
+                let _ = child.stdin.take();
+                let _ = child.kill();
+                let start = std::time::Instant::now();
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(_)) => break,
+                        Ok(None) if start.elapsed() > std::time::Duration::from_secs(3) => {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            break;
+                        }
+                        Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+                        Err(_) => break,
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ─── Application State ───────────────────────────────────────────────
 
 /// Map of session_id → SessionHandle.
 struct Sessions(Arc<Mutex<HashMap<String, SessionHandle>>>);
+
+/// Cached model list — populated from the first `model_list` SM message
+/// received from any session. Avoids spawning temp processes.
+/// Uses std::sync::Mutex because it's accessed from sync threads (stdout reader).
+struct ModelCache(Arc<std::sync::Mutex<Vec<serde_json::Value>>>);
 
 // ─── Event Payloads (all include session_id) ─────────────────────────
 
@@ -44,6 +237,10 @@ pub struct FrameEvent {
     pub content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub json: Option<serde_json::Value>,
+    /// User-role content parts include a `user_content_type` field so the
+    /// frontend can distinguish user echoes (UT on stdout) from the direction.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_content_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -67,6 +264,11 @@ pub struct MediaItem {
     pub uri: String,
 }
 
+/// User-role content tags that appear on stdout (echoes).
+fn is_user_echo_tag(tag: &str) -> bool {
+    matches!(tag, "UT" | "UI" | "UV" | "UA" | "UD")
+}
+
 // ─── Background stdout reader ────────────────────────────────────────
 
 fn spawn_stdout_reader(
@@ -74,42 +276,102 @@ fn spawn_stdout_reader(
     session_id: String,
     mut stdout: std::process::ChildStdout,
     connected: Arc<AtomicBool>,
+    model_cache: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    child: Arc<std::sync::Mutex<Option<std::process::Child>>>,
 ) {
     std::thread::spawn(move || {
-        let sid = session_id; // move session_id into the closure
+        let sid = session_id;
+
+        // Helper: reap the child process to prevent zombies
+        let reap_child = || {
+            if let Ok(mut guard) = child.lock() {
+                if let Some(mut c) = guard.take() {
+                    let _ = c.stdin.take();
+                    let start = std::time::Instant::now();
+                    loop {
+                        match c.try_wait() {
+                            Ok(Some(_)) => break,
+                            Ok(None) if start.elapsed() > std::time::Duration::from_secs(3) => {
+                                let _ = c.kill();
+                                let _ = c.wait();
+                                break;
+                            }
+                            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+                            Err(_) => break,
+                        }
+                    }
+                }
+            }
+        };
+
         loop {
             match tlv::read_frame(&mut stdout) {
                 Ok(Some(frame)) => {
                     let tag = &frame.tag;
                     let raw_value = &frame.value;
 
-                    // Delta events (AT/AR)
+                    // SM frames: cache model_list if present
+                    if tag == "SM" {
+                        if let Ok(env) = serde_json::from_str::<tlv::SystemMsgEnvelope>(raw_value) {
+                            if env.msg_type == "model_list" {
+                                if let Some(arr) = env.data.get("models").and_then(|v| v.as_array()) {
+                                    let mut cache = model_cache.lock().unwrap();
+                                    *cache = arr.clone();
+                                }
+                            }
+                        }
+                    }
+
+                    // Delta events (AT/AR) — may or may not have a NUL prefix
                     if tag == "AT" || tag == "AR" {
                         let (history_id, content, has_delta) = tlv::unwrap_delta(raw_value);
                         if has_delta {
+                            let hid = history_id.clone();
+                            let ct = content.clone();
                             let _ = app.emit("tlv-delta", DeltaEvent {
                                 session_id: sid.clone(),
                                 history_id,
                                 content,
                                 tag: tag.clone(),
                             });
+                            // Also emit as tlv-frame for non-delta consumers
+                            let _ = app.emit("tlv-frame", FrameEvent {
+                                session_id: sid.clone(),
+                                tag: tag.clone(),
+                                raw_value: raw_value.clone(),
+                                history_id: Some(hid),
+                                content: Some(ct),
+                                json: None,
+                                user_content_type: None,
+                            });
                             continue;
                         }
+                        // No NUL prefix (e.g. session replay) — send as frame
+                        let _ = app.emit("tlv-frame", FrameEvent {
+                            session_id: sid.clone(),
+                            tag: tag.clone(),
+                            raw_value: raw_value.clone(),
+                            history_id: None,
+                            content: Some(raw_value.clone()),
+                            json: None,
+                            user_content_type: None,
+                        });
+                        // Also emit as delta so frontend can render it
+                        let _ = app.emit("tlv-delta", DeltaEvent {
+                            session_id: sid.clone(),
+                            history_id: String::new(),
+                            content: raw_value.clone(),
+                            tag: tag.clone(),
+                        });
+                        continue;
                     }
 
-                    // Parse JSON payloads for AF/UF/SM
+                    // Parse JSON payloads for AF/UF
                     let mut json_val = None;
                     let mut history_id = None;
                     let mut content = None;
 
-                    if tag == "SM" {
-                        if let Ok(env) = serde_json::from_str::<tlv::SystemMsgEnvelope>(raw_value) {
-                            json_val = Some(serde_json::json!({
-                                "type": env.msg_type,
-                                "data": env.data
-                            }));
-                        }
-                    } else if tag == "AF" || tag == "UF" {
+                    if tag == "AF" || tag == "UF" {
                         let (sid_val, raw_content, has_delta) = tlv::unwrap_delta(raw_value);
                         if has_delta {
                             history_id = Some(sid_val);
@@ -121,7 +383,16 @@ fn spawn_stdout_reader(
                             json_val = Some(v);
                             content = Some(raw_value.clone());
                         }
+                    } else if tag == "SM" {
+                        if let Ok(env) = serde_json::from_str::<tlv::SystemMsgEnvelope>(raw_value) {
+                            json_val = Some(serde_json::json!({
+                                "type": env.msg_type,
+                                "data": env.data
+                            }));
+                            content = Some(raw_value.clone());
+                        }
                     } else {
+                        // User echo tags (UT/UI/UV/UA/UD on stdout) or others
                         let (sid_val, raw_content, has_delta) = tlv::unwrap_delta(raw_value);
                         if has_delta {
                             history_id = Some(sid_val);
@@ -131,6 +402,12 @@ fn spawn_stdout_reader(
                         }
                     }
 
+                    let user_content_type = if is_user_echo_tag(tag) {
+                        Some(tag.to_string())
+                    } else {
+                        None
+                    };
+
                     let _ = app.emit("tlv-frame", FrameEvent {
                         session_id: sid.clone(),
                         tag: tag.clone(),
@@ -138,10 +415,12 @@ fn spawn_stdout_reader(
                         history_id,
                         content,
                         json: json_val,
+                        user_content_type,
                     });
                 }
                 Ok(None) => {
                     connected.store(false, Ordering::SeqCst);
+                    reap_child();
                     let _ = app.emit("core-status", StatusEvent {
                         session_id: sid.clone(),
                         connected: false,
@@ -151,6 +430,7 @@ fn spawn_stdout_reader(
                 }
                 Err(e) => {
                     connected.store(false, Ordering::SeqCst);
+                    reap_child();
                     let _ = app.emit("core-status", StatusEvent {
                         session_id: sid.clone(),
                         connected: false,
@@ -189,32 +469,64 @@ fn spawn_stderr_collector(
 async fn create_session(
     app: AppHandle,
     binary_path: String,
+    config_path: String,
     sessions: State<'_, Sessions>,
+    model_cache: State<'_, ModelCache>,
 ) -> Result<String, String> {
+    // Ensure ~/.alayaface/ exists with default config
+    let (_template_dir, sessions_dir) = ensure_alayaface_dirs()?;
+
     let bin = if binary_path.is_empty() {
         alayacore::find_binary()
     } else {
         binary_path
     };
 
-    let proc = alayacore::spawn(&bin).map_err(|e| format!("Failed to start alayacore: {e}"))?;
     let session_id = Uuid::new_v4().to_string();
+
+    // Create session directory with its own config + session.md
+    let session_dir = create_session_dir(&sessions_dir, &session_id)?;
+
+    // Resolve config path: prefer explicit, otherwise use session's own config
+    let effective_config = if config_path.is_empty() {
+        session_dir.join("config").to_string_lossy().to_string()
+    } else {
+        config_path
+    };
+
+    // Session file path
+    let session_file = session_dir.join("session.md").to_string_lossy().to_string();
+
+    alog!("Spawning alayacore: {} --rawio --config-path {} --session {}", &bin, &effective_config, &session_file);
+
+    let proc = alayacore::spawn(&bin, &effective_config, &session_file)
+        .map_err(|e| format!("Failed to start alayacore: {e}"))?;
 
     let connected = Arc::new(AtomicBool::new(true));
     let stderr_log = Arc::new(Mutex::new(Vec::new()));
     let stdin = Arc::new(Mutex::new(proc.stdin));
+    let child = Arc::new(std::sync::Mutex::new(Some(proc.child)));
 
     let handle = SessionHandle {
         stdin: stdin.clone(),
         connected: connected.clone(),
         stderr_log: stderr_log.clone(),
+        child: child.clone(),
+        session_dir: session_dir.clone(),
     };
 
     sessions.0.lock().await.insert(session_id.clone(), handle);
 
     // Spawn background readers
     spawn_stderr_collector(proc.stderr, stderr_log);
-    spawn_stdout_reader(app.clone(), session_id.clone(), proc.stdout, connected);
+    spawn_stdout_reader(
+        app.clone(),
+        session_id.clone(),
+        proc.stdout,
+        connected,
+        model_cache.0.clone(),
+        child.clone(),
+    );
 
     let _ = app.emit("core-status", StatusEvent {
         session_id: session_id.clone(),
@@ -232,11 +544,34 @@ async fn close_session(
     sessions: State<'_, Sessions>,
 ) -> Result<(), String> {
     let mut map = sessions.0.lock().await;
-    if map.remove(&session_id).is_none() {
-        return Err("Session not found".to_string());
+    if let Some(handle) = map.remove(&session_id) {
+        // Explicitly kill the child process
+        let child_opt = handle.child.lock().unwrap().take();
+        if let Some(mut child) = child_opt {
+            let _ = child.stdin.take(); // close stdin
+            let _ = child.kill();
+            // Wait briefly in a blocking task
+            let _ = tokio::task::spawn_blocking(move || {
+                let start = std::time::Instant::now();
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(_)) => break,
+                        Ok(None) if start.elapsed() > std::time::Duration::from_secs(3) => {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            break;
+                        }
+                        Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+                        Err(_) => break,
+                    }
+                }
+            })
+            .await;
+        }
+        Ok(())
+    } else {
+        Err("Session not found".to_string())
     }
-    // Dropping the SessionHandle closes stdin (sends EOF) and drops the process
-    Ok(())
 }
 
 /// List all active session IDs.
@@ -246,6 +581,92 @@ async fn list_sessions(
 ) -> Result<Vec<String>, String> {
     let map = sessions.0.lock().await;
     Ok(map.keys().cloned().collect())
+}
+
+/// List all session directories on disk (from ~/.alayaface/sessions/).
+/// Returns session info: id, has_session_file, created_at.
+#[derive(Serialize)]
+pub struct SessionDirInfo {
+    pub id: String,
+    pub has_session_file: bool,
+    pub created_at: String,
+}
+
+#[tauri::command]
+async fn list_session_dirs() -> Result<Vec<SessionDirInfo>, String> {
+    let sessions_dir = alayaface_dir().join("sessions");
+    if !sessions_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut result = Vec::new();
+    let mut entries: Vec<_> = std::fs::read_dir(&sessions_dir)
+        .map_err(|e| format!("Cannot read sessions dir: {e}"))?
+        .filter_map(|e| e.ok())
+        .collect();
+    // Sort by modification time (newest first)
+    entries.sort_by_key(|e| std::cmp::Reverse(e.path().metadata().ok().and_then(|m| m.modified().ok())));
+
+    for entry in entries {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let id = entry.file_name().to_string_lossy().to_string();
+        let session_file = path.join("session.md");
+        let has_session_file = session_file.exists();
+
+        let created_at = path
+            .metadata()
+            .ok()
+            .and_then(|m| m.created().ok())
+            .map(|t| {
+                let secs = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                // Return Unix timestamp — frontend can format it
+                secs.to_string()
+            })
+            .unwrap_or_else(|| "0".to_string());
+
+        result.push(SessionDirInfo {
+            id,
+            has_session_file,
+            created_at,
+        });
+    }
+
+    Ok(result)
+}
+
+/// Permanently delete a session directory from disk.
+/// If the session is currently running, closes it first.
+#[tauri::command]
+async fn delete_session_dir(
+    session_id: String,
+    sessions: State<'_, Sessions>,
+) -> Result<(), String> {
+    // Close if running
+    {
+        let mut map = sessions.0.lock().await;
+        if let Some(handle) = map.remove(&session_id) {
+            let child_opt = handle.child.lock().unwrap().take();
+            if let Some(mut child) = child_opt {
+                let _ = child.stdin.take();
+                let _ = child.kill();
+                let _ = tokio::task::spawn_blocking(move || {
+                    let _ = child.wait();
+                }).await;
+            }
+        }
+    }
+
+    // Remove directory
+    let session_dir = alayaface_dir().join("sessions").join(&session_id);
+    if session_dir.exists() {
+        std::fs::remove_dir_all(&session_dir)
+            .map_err(|e| format!("Cannot delete {:?}: {}", session_dir, e))?;
+    }
+
+    Ok(())
 }
 
 /// Check if a specific session is still connected.
@@ -277,6 +698,12 @@ async fn send_raw_to_session(
     value: &str,
 ) -> Result<(), String> {
     let handle = get_session(map, session_id)?;
+
+    // Check if still connected
+    if !handle.connected.load(Ordering::SeqCst) {
+        return Err("Session is disconnected".to_string());
+    }
+
     let mut stdin = handle.stdin.lock().await;
     tlv::write_frame(&mut *stdin, tag, value)
         .map_err(|e| format!("Write error: {e}"))?;
@@ -302,11 +729,16 @@ async fn alayacore_send_prompt(
     session_id: String,
     text: String,
     media: Vec<MediaItem>,
-    app: AppHandle,
     sessions: State<'_, Sessions>,
 ) -> Result<(), String> {
     let map = sessions.0.lock().await;
     let handle = get_session(&map, &session_id)?;
+
+    // Check if still connected
+    if !handle.connected.load(Ordering::SeqCst) {
+        return Err("Session is disconnected".to_string());
+    }
+
     let mut stdin = handle.stdin.lock().await;
 
     for item in &media {
@@ -329,21 +761,6 @@ async fn alayacore_send_prompt(
     tlv::write_frame(&mut *stdin, tlv::TAG_USER_END, "")
         .map_err(|e| format!("Write error: {e}"))?;
     stdin.flush().map_err(|e| format!("Flush error: {e}"))?;
-
-    let display_text = if !text.is_empty() { text.clone() } else { "(media message)".to_string() };
-
-    // Emit a PROMPT frame so the frontend can display the user message
-    let _ = app.emit("tlv-frame", FrameEvent {
-        session_id: session_id.clone(),
-        tag: "PROMPT".to_string(),
-        raw_value: String::new(),
-        history_id: None,
-        content: Some(display_text),
-        json: Some(serde_json::json!({
-            "text": text,
-            "media": media,
-        })),
-    });
 
     Ok(())
 }
@@ -531,21 +948,75 @@ async fn get_stderr_log(
     Ok(log)
 }
 
-/// List available models by briefly spawning alayacore and reading the model list.
+/// Get cached models from any running session.
+/// Falls back to spawning a temporary alayacore process if no session is active
+/// or no model_list has been received yet.
 #[tauri::command]
-async fn list_models(binary_path: String) -> Result<Vec<serde_json::Value>, String> {
+async fn list_models(
+    binary_path: String,
+    config_path: String,
+    model_cache: State<'_, ModelCache>,
+    sessions: State<'_, Sessions>,
+) -> Result<Vec<serde_json::Value>, String> {
+    // First, try the cache from running sessions
+    {
+        let cache = model_cache.0.lock().unwrap();
+        if !cache.is_empty() {
+            return Ok(cache.clone());
+        }
+    }
+
+    // If there's an active session that's connected, request model_list via :model_load
+    {
+        let map = sessions.0.lock().await;
+        // Try to find any connected session and ask it for model_list
+        for (_sid, handle) in map.iter() {
+            if handle.connected.load(Ordering::SeqCst) {
+                // Don't block — just send the command, the cache will be updated
+                // when the session responds with model_list
+                let mut stdin = handle.stdin.lock().await;
+                let _ = tlv::write_frame(&mut *stdin, tlv::TAG_USER_TEXT, ":model_load");
+                let _ = tlv::write_frame(&mut *stdin, tlv::TAG_USER_END, "");
+                let _ = stdin.flush();
+                // Return whatever we have in cache (might be empty if first time)
+                let cache = model_cache.0.lock().unwrap();
+                if !cache.is_empty() {
+                    return Ok(cache.clone());
+                }
+                // If cache is still empty, fall through to spawn temp process
+                break;
+            }
+        }
+    }
+
+    // Fallback: spawn a temporary alayacore process
     let bin = if binary_path.is_empty() {
         alayacore::find_binary()
     } else {
         binary_path
     };
 
-    let proc = alayacore::spawn(&bin).map_err(|e| format!("Failed to start alayacore: {e}"))?;
+    let mut cmd = std::process::Command::new(&bin);
+    cmd.arg("--rawio");
+    if !config_path.is_empty() {
+        cmd.arg("--config-path");
+        cmd.arg(&config_path);
+    }
+    let mut child = cmd
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("Failed to start alayacore: {e}"))?;
 
-    let mut stdout = proc.stdout;
+    // Close stdin immediately so alayacore gets EOF
+    drop(child.stdin.take());
+
+    let mut stdout = child.stdout.take()
+        .ok_or_else(|| "Failed to capture stdout".to_string())?;
+
     let mut models = Vec::new();
 
-    // Read frames until we get the model_list or timeout
     let start = std::time::Instant::now();
     let timeout = std::time::Duration::from_secs(5);
 
@@ -561,23 +1032,24 @@ async fn list_models(binary_path: String) -> Result<Vec<serde_json::Value>, Stri
                         if env.msg_type == "model_list" {
                             if let Some(arr) = env.data.get("models").and_then(|v| v.as_array()) {
                                 models = arr.clone();
+                                // Also update the cache
+                                let mut cache = model_cache.0.lock().unwrap();
+                                *cache = models.clone();
                             }
                             break;
                         }
-                        if env.msg_type == "model" {
-                            // Also capture active model info if needed
-                        }
                     }
                 }
-                // Ignore other frames
             }
             Ok(None) => break,
             Err(_) => break,
         }
     }
 
-    // Kill the temporary process
-    drop(proc.child);
+    // Kill the temp process cleanly
+    drop(stdout);
+    let _ = child.kill();
+    let _ = child.wait();
 
     Ok(models)
 }
@@ -589,10 +1061,13 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(Sessions(Arc::new(Mutex::new(HashMap::new()))))
+        .manage(ModelCache(Arc::new(std::sync::Mutex::new(Vec::new()))))
         .invoke_handler(tauri::generate_handler![
             create_session,
             close_session,
             list_sessions,
+            list_session_dirs,
+            delete_session_dir,
             session_connected,
             alayacore_send_message,
             alayacore_send_prompt,

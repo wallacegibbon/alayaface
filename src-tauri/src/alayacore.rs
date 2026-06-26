@@ -8,7 +8,6 @@ use std::process::{Child, Command, Stdio};
 
 /// Spawned alayacore process with its pipes.
 pub struct CoreProcess {
-    #[allow(dead_code)]
     pub child: Child,
     pub stdin: std::process::ChildStdin,
     pub stdout: std::process::ChildStdout,
@@ -16,9 +15,20 @@ pub struct CoreProcess {
 }
 
 /// Start alayacore with `--rawio` and return the process + pipes.
-pub fn spawn(binary_path: &str) -> io::Result<CoreProcess> {
-    let mut child = Command::new(binary_path)
-        .arg("--rawio")
+/// If `config_path` is non-empty, passes `--config-path <config_path>`.
+/// If `session_path` is non-empty, passes `--session <session_path>`.
+pub fn spawn(binary_path: &str, config_path: &str, session_path: &str) -> io::Result<CoreProcess> {
+    let mut cmd = Command::new(binary_path);
+    cmd.arg("--rawio");
+    if !config_path.is_empty() {
+        cmd.arg("--config-path");
+        cmd.arg(config_path);
+    }
+    if !session_path.is_empty() {
+        cmd.arg("--session");
+        cmd.arg(session_path);
+    }
+    let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -37,22 +47,40 @@ pub fn spawn(binary_path: &str) -> io::Result<CoreProcess> {
 }
 
 /// Helper to detect the alayacore binary.
-/// Tries PATH first, then checks common locations.
+///
+/// Resolution order:
+/// 1. `ALAYACORE_BIN` environment variable
+/// 2. `which alayacore` (Unix) or `where alayacore` (Windows)
+/// 3. Known relative/absolute paths
+/// 4. Fallback to "alayacore" (assume in PATH)
 pub fn find_binary() -> String {
-    // Check if "alayacore" exists in PATH via `which`
-    if let Ok(output) = std::process::Command::new("which")
+    // 1. Check env var
+    if let Ok(bin) = std::env::var("ALAYACORE_BIN") {
+        if !bin.is_empty() && std::path::Path::new(&bin).exists() {
+            return bin;
+        }
+    }
+
+    // 2. Try `which` (Unix) or `where` (Windows)
+    let which_cmd = if cfg!(target_os = "windows") { "where" } else { "which" };
+    if let Ok(output) = std::process::Command::new(which_cmd)
         .arg("alayacore")
         .output()
     {
         if output.status.success() {
-            let bin = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let bin = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
             if !bin.is_empty() {
                 return bin;
             }
         }
     }
 
-    // Check common locations relative to this project
+    // 3. Check common locations
     for candidate in &[
         "alayacore",
         "../alayacore/alayacore",
@@ -65,6 +93,6 @@ pub fn find_binary() -> String {
         }
     }
 
-    // Fallback — hope it's in PATH
+    // 4. Fallback
     "alayacore".to_string()
 }

@@ -1,127 +1,106 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useReducer } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
+import {
+  type DeltaEvent,
+  type FrameEvent,
+  type StatusEvent,
+  type MediaItem,
+  type StagedMedia,
+  type Message,
+  type SessionState,
+  MEDIA_ICON,
+  uploadItems,
+  shortName,
+  fileToDataUri,
+  createSessionState,
+  isUserEchoTag,
+  echoTagToMediaType,
+  echoTagToLabel,
+} from "./types";
 import "./App.css";
 import "./components/HomeScreen.css";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
-interface DeltaEvent {
-  session_id: string;
-  history_id: string;
-  content: string;
-  tag: "AT" | "AR";
+interface UrlModalProps {
+  initialType: string;
+  onClose: () => void;
+  onConfirm: (url: string, type: string) => void;
 }
 
-interface FrameEvent {
-  session_id: string;
-  tag: string;
-  raw_value: string;
-  history_id: string | null;
-  content: string | null;
-  json: Record<string, unknown> | null;
+// ─── Reducer for session state (more efficient than useState spread) ─
+
+type SessionAction =
+  | { type: "UPDATE_SESSION"; sessionId: string; updater: (s: SessionState) => SessionState }
+  | { type: "REMOVE_SESSION"; sessionId: string }
+  | { type: "ADD_SESSION"; session: SessionState }
+  | { type: "SET_ACTIVE"; sessionId: string | null };
+
+interface SessionReducerState {
+  sessions: SessionState[];
+  activeId: string | null;
+  /** Pending updaters for sessions that haven't been added yet (race from early frames). */
+  pendingSessionEvents: Map<string, Array<(s: SessionState) => SessionState>>;
 }
 
-interface StatusEvent {
-  session_id: string;
-  connected: boolean;
-  message: string;
-}
-
-interface MediaItem {
-  media_type: "image" | "audio" | "video" | "document";
-  uri: string;
-  name?: string;
-}
-
-interface StagedMedia extends MediaItem {
-  id: string;
-}
-
-interface Message {
-  id: string;
-  role: "user" | "assistant" | "tool" | "system" | "reasoning";
-  content: string;
-  tool_id?: string;
-  tool_name?: string;
-  is_error?: boolean;
-  history_id?: string;
-  media?: MediaItem[];
-}
-
-interface ToolCall {
-  id: string;
-  name: string;
-  input?: Record<string, unknown>;
-  output?: string;
-  is_error?: boolean;
-  started: boolean;
-  input_received: boolean;
-}
-
-interface NotificationItem {
-  id: string;
-  type: "notify" | "error";
-  text: string;
-  timestamp: number;
-}
-
-interface SessionState {
-  id: string;
-  connected: boolean;
-  statusMsg: string;
-  messages: Message[];
-  staged: StagedMedia[];
-  models: { id: number; name: string }[];
-  activeModelId: number | null;
-  activeModelName: string;
-  taskRunning: boolean;
-  contextTokens: number;
-  contextLimit: number;
-  historyContents: Map<string, string>;
-  historyRoles: Map<string, "assistant" | "reasoning">;
-  toolCalls: Map<string, ToolCall>;
-  stderrLines: string[];
-  notifications: NotificationItem[];
-  input: string;
-}
-
-// ─── Media helpers ───────────────────────────────────────────────────
-
-const MEDIA_ACCEPT: Record<string, string> = {
-  image: "image/*",
-  audio: "audio/*",
-  video: "video/*",
-  document: ".pdf,.txt,.md,.json,.csv,.xml,.yaml,.yml,.toml,.html,.css,.js,.ts,.rs,.py,.go,.java,.c,.cpp,.h,.hpp",
-};
-
-const MEDIA_ICON: Record<string, string> = {
-  image: "🖼", audio: "🎵", video: "🎬", document: "📄",
-};
-
-// ─── Upload items for attach dropdown ─────────────────────────────────
-
-const uploadItems = [
-  { icon: "🖼", label: "Image", accept: MEDIA_ACCEPT.image, type: "image" as const },
-  { icon: "🎵", label: "Audio", accept: MEDIA_ACCEPT.audio, type: "audio" as const },
-  { icon: "🎬", label: "Video", accept: MEDIA_ACCEPT.video, type: "video" as const },
-  { icon: "📄", label: "Document", accept: MEDIA_ACCEPT.document, type: "document" as const },
-  { icon: "🔗", label: "From URL", accept: "", type: "url" as const },
-];
-
-function shortName(uri: string, name?: string): string {
-  if (name) return name;
-  if (uri.startsWith("data:")) {
-    const mime = uri.split(";")[0]?.replace("data:", "") || "file";
-    return `[${mime}]`;
+function sessionReducer(state: SessionReducerState, action: SessionAction): SessionReducerState {
+  switch (action.type) {
+    case "UPDATE_SESSION": {
+      const exists = state.sessions.some((s) => s.id === action.sessionId);
+      if (!exists) {
+        // Session not yet registered — buffer the update for later replay
+        const pending = new Map(state.pendingSessionEvents);
+        const existing = pending.get(action.sessionId) || [];
+        pending.set(action.sessionId, [...existing, action.updater]);
+        return { ...state, pendingSessionEvents: pending };
+      }
+      return {
+        ...state,
+        sessions: state.sessions.map((s) =>
+          s.id === action.sessionId ? action.updater(s) : s
+        ),
+      };
+    }
+    case "REMOVE_SESSION": {
+      const remaining = state.sessions.filter((s) => s.id !== action.sessionId);
+      // Clean up pending events too
+      const pending = new Map(state.pendingSessionEvents);
+      pending.delete(action.sessionId);
+      return {
+        ...state,
+        sessions: remaining,
+        pendingSessionEvents: pending,
+        activeId: state.activeId === action.sessionId
+          ? (remaining.length > 0 ? remaining[remaining.length - 1].id : null)
+          : state.activeId,
+      };
+    }
+    case "ADD_SESSION": {
+      const newSessions = [...state.sessions, action.session];
+      const sid = action.session.id;
+      // Apply any pending events that arrived before the session was registered
+      const pending = new Map(state.pendingSessionEvents);
+      const updates = pending.get(sid) || [];
+      pending.delete(sid);
+      const finalSession = updates.reduce((s, updater) => updater(s), action.session);
+      // Replace the last entry (the raw session) with the updated one
+      newSessions[newSessions.length - 1] = finalSession;
+      return {
+        ...state,
+        sessions: newSessions,
+        pendingSessionEvents: pending,
+        activeId: sid,
+      };
+    }
+    case "SET_ACTIVE":
+      return { ...state, activeId: action.sessionId };
   }
-  try { const u = new URL(uri); const parts = u.pathname.split("/").filter(Boolean); return parts.pop() || uri; }
-  catch { return uri.length > 40 ? uri.slice(0, 40) + "…" : uri; }
 }
 
 // ─── URL Modal ───────────────────────────────────────────────────────
 
-function UrlModal({ initialType, onClose, onConfirm }: { initialType: string; onClose: () => void; onConfirm: (url: string, type: string) => void }) {
+function UrlModal({ initialType, onClose, onConfirm }: UrlModalProps) {
   const [url, setUrl] = useState("");
   const [type, setType] = useState(initialType);
   const ref = useRef<HTMLInputElement>(null);
@@ -146,102 +125,21 @@ function UrlModal({ initialType, onClose, onConfirm }: { initialType: string; on
   );
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────
-
-function createSessionState(id: string): SessionState {
-  return {
-    id,
-    connected: true,
-    statusMsg: "Connected",
-    messages: [],
-    staged: [],
-    models: [],
-    activeModelId: null,
-    activeModelName: "",
-    taskRunning: false,
-    contextTokens: 0,
-    contextLimit: 0,
-    historyContents: new Map(),
-    historyRoles: new Map(),
-    toolCalls: new Map(),
-    stderrLines: [],
-    notifications: [],
-    input: "",
-  };
-}
-
-// ─── MIME type normalization ──────────────────────────────────────────
-
-const MIME_ALIAS: Record<string, string> = {
-  "audio/vnd.wave": "audio/wav",
-  "audio/x-wav": "audio/wav",
-  "audio/x-mpeg": "audio/mpeg",
-  "audio/mpeg3": "audio/mpeg",
-  "audio/x-mpeg-3": "audio/mpeg",
-  "audio/x-m4a": "audio/mp4",
-  "video/x-msvideo": "video/avi",
-  "video/x-matroska": "video/mkv",
-  "image/jpg": "image/jpeg",
-  "image/x-png": "image/png",
-  "image/x-ms-bmp": "image/bmp",
-  "image/x-icon": "image/vnd.microsoft.icon",
-  "application/x-javascript": "text/javascript",
-  "text/x-typescript": "text/typescript",
-};
-
-function normalizeMime(mime: string, fileName: string): string {
-  // Check known aliases
-  const lower = mime.toLowerCase();
-  if (MIME_ALIAS[lower]) return MIME_ALIAS[lower];
-  // If it's an obscure vendor type like audio/vnd.*, try falling back to extension-based type
-  if (lower.includes("/vnd.")) {
-    const ext = fileName.split(".").pop()?.toLowerCase();
-    if (ext === "wav") return "audio/wav";
-    if (ext === "mp3") return "audio/mpeg";
-    if (ext === "mp4") return "video/mp4";
-    if (ext === "webm") return "video/webm";
-    if (ext === "ogg" || ext === "oga") return "audio/ogg";
-    if (ext === "ogv") return "video/ogg";
-    if (ext === "jpg" || ext === "jpeg") return "image/jpeg";
-    if (ext === "png") return "image/png";
-    if (ext === "gif") return "image/gif";
-    if (ext === "webp") return "image/webp";
-  }
-  return mime;
-}
-
-function fileToDataUri(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const dataUri = reader.result as string;
-      // Fix MIME type if browser used a non-standard one
-      const comma = dataUri.indexOf(",");
-      const header = dataUri.slice(0, comma);
-      const rawMime = header.replace("data:", "");
-      const normalized = normalizeMime(rawMime, file.name);
-      if (normalized !== rawMime) {
-        resolve(`data:${normalized};base64,${dataUri.slice(comma + 1)}`);
-      } else {
-        resolve(dataUri);
-      }
-    };
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
-}
-
 // ─── Component ───────────────────────────────────────────────────────
 
 function App() {
-  // Session management
-  const [sessions, setSessions] = useState<SessionState[]>([]);
-  const [activeId, setActiveId] = useState<string | null>(null);
-  const [binaryPath, setBinaryPath] = useState("");
+  const [{ sessions, activeId }, dispatch] = useReducer(sessionReducer, {
+    sessions: [],
+    activeId: null,
+    pendingSessionEvents: new Map(),
+  });
   const [showLogs, setShowLogs] = useState(false);
   const [showUrlModal, setShowUrlModal] = useState<string | false>(false);
   const [showUploadMenu, setShowUploadMenu] = useState(false);
   const [showModelMenu, setShowModelMenu] = useState(false);
+  const [initializing, setInitializing] = useState(true);
+  const [initError, setInitError] = useState<string | null>(null);
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; message: Message } | null>(null);
   const sendingRef = useRef(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -251,6 +149,8 @@ function App() {
   const modelTriggerRef = useRef<HTMLButtonElement>(null);
   const uploadDropdownRef = useRef<HTMLDivElement>(null);
   const modelDropdownRef = useRef<HTMLDivElement>(null);
+  const ctxMenuRef = useRef<HTMLDivElement>(null);
+  const notificationTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
   const activeSess = sessions.find((s) => s.id === activeId);
 
@@ -261,11 +161,11 @@ function App() {
     let cancelled = false;
 
     const setup = async () => {
+      // ─── tlv-delta (AT/AR streaming) ────────────────────────────────
       const un1 = await listen<DeltaEvent>("tlv-delta", (ev) => {
         const { session_id, history_id, content, tag } = ev.payload;
         const role = tag === "AT" ? "assistant" : "reasoning";
-        setSessions((prev) => prev.map((s) => {
-          if (s.id !== session_id) return s;
+        dispatch({ type: "UPDATE_SESSION", sessionId: session_id, updater: (s) => {
           const existing = s.historyContents.get(history_id);
           const newHistoryContents = new Map(s.historyContents);
           const newMsgs = [...s.messages];
@@ -279,23 +179,89 @@ function App() {
             newMsgs.push({ id: `hist-${history_id}-${Date.now()}`, role, content, history_id });
           }
           return { ...s, historyContents: newHistoryContents, messages: newMsgs };
-        }));
+        }});
       });
       if (cancelled) { un1(); return; }
       unlisteners.push(un1);
 
+      // ─── tlv-frame (all other frames) ───────────────────────────────
       const un2 = await listen<FrameEvent>("tlv-frame", (ev) => {
-        const { session_id, tag, json } = ev.payload;
-        setSessions((prev) => prev.map((s) => {
-          if (s.id !== session_id) return s;
+        const { session_id, tag, json, history_id, content } = ev.payload;
 
-          if (tag === "PROMPT" && json) {
-            const pd = json as { text?: string; media?: MediaItem[] };
-            const media = pd.media || [];
-            const text = pd.text || "";
-            return { ...s, messages: [...s.messages, { id: `prompt-${Date.now()}`, role: "user" as const, content: text || "(media message)", media }] };
+        dispatch({ type: "UPDATE_SESSION", sessionId: session_id, updater: (s) => {
+          // ── Handle user echo frames (UT/UI/UV/UA/UD on stdout) ──────
+          if (isUserEchoTag(tag)) {
+            const mediaType = echoTagToMediaType(tag);
+            const textContent = tag === "UT" ? (content || "") : "";
+            const label = echoTagToLabel(tag);
+
+            // Build media item for non-text echoes
+            const mediaItem: MediaItem | null = mediaType && content
+              ? { media_type: mediaType, uri: content }
+              : null;
+
+            // If this is the first user echo after a non-user frame (or initial),
+            // start a new pending user message
+            const newParts = [...s.pendingUserParts];
+
+            // Check if we already have a pending user message (consecutive user echoes)
+            // If no pending parts and we have messages, the last message might be a user message
+            // that we should append to
+            if (newParts.length === 0 && s.messages.length > 0) {
+              const lastMsg = s.messages[s.messages.length - 1];
+              if (lastMsg.role === "user" && lastMsg.history_id === history_id) {
+                // Same user message — update in place
+                const newMsgs = [...s.messages];
+                if (tag === "UT") {
+                  newMsgs[newMsgs.length - 1] = {
+                    ...lastMsg,
+                    content: textContent,
+                    history_id: history_id || undefined,
+                  };
+                } else if (mediaItem) {
+                  const existingMedia = lastMsg.media || [];
+                  newMsgs[newMsgs.length - 1] = {
+                    ...lastMsg,
+                    media: [...existingMedia, mediaItem],
+                    history_id: history_id || undefined,
+                  };
+                }
+                return { ...s, messages: newMsgs, sendPending: false };
+              }
+            }
+
+            // Accumulate into pending parts
+            newParts.push({
+              id: `userpart-${history_id || Date.now()}`,
+              historyId: history_id || "",
+              tag,
+              content: textContent || label,
+              media_type: mediaType || undefined,
+            });
+
+            return { ...s, pendingUserParts: newParts, sendPending: false };
           }
 
+          // ── Non-user tag: flush any pending user content ─────────────
+          let newS = s;
+          if (newS.pendingUserParts.length > 0) {
+            const parts = newS.pendingUserParts;
+            const textParts = parts.filter((p) => p.tag === "UT").map((p) => p.content).join("\n");
+            const mediaParts: MediaItem[] = parts
+              .filter((p) => p.media_type)
+              .map((p) => ({ media_type: p.media_type!, uri: p.content }));
+
+            const userMsg: Message = {
+              id: `user-echo-${Date.now()}`,
+              role: "user",
+              content: textParts || (mediaParts.length > 0 ? "(media message)" : ""),
+              media: mediaParts.length > 0 ? mediaParts : undefined,
+              history_id: parts[0]?.historyId || undefined,
+            };
+            newS = { ...newS, messages: [...newS.messages, userMsg], pendingUserParts: [] };
+          }
+
+          // ── SM: system messages ──────────────────────────────────────
           if (tag === "SM" && json) {
             const sm = json as { type?: string; data?: Record<string, unknown> };
             const d = sm.data || {};
@@ -303,52 +269,54 @@ function App() {
               case "task": {
                 const td = d as Record<string, unknown>;
                 const tokens = (td.context ?? td.tokens ?? td.context_tokens ?? td.usage) as number | undefined;
-                return { ...s, taskRunning: (td.in_progress as boolean) ?? false, contextTokens: tokens ?? s.contextTokens, statusMsg: td.in_progress ? "Task in progress…" : "Task complete" };
+                return { ...newS, taskRunning: (td.in_progress as boolean) ?? false, contextTokens: tokens ?? newS.contextTokens, statusMsg: td.in_progress ? "Task in progress…" : "Task complete" };
               }
               case "error": {
                 const ed = d as { text?: string };
                 const errId = `err-${Date.now()}`;
-                return { ...s, notifications: [...s.notifications, { id: errId, type: "error", text: ed.text || "Unknown error", timestamp: Date.now() }] };
+                return { ...newS, notifications: [...newS.notifications, { id: errId, type: "error", text: ed.text || "Unknown error", timestamp: Date.now() }] };
               }
               case "notify": {
                 const nd = d as { text?: string };
                 const notId = `notify-${Date.now()}`;
-                return { ...s, notifications: [...s.notifications, { id: notId, type: "notify", text: nd.text || "", timestamp: Date.now() }] };
+                return { ...newS, notifications: [...newS.notifications, { id: notId, type: "notify", text: nd.text || "", timestamp: Date.now() }] };
               }
               case "model_list": {
                 const ml = d as { models?: { id?: number; name?: string }[] };
-                if (ml.models) return { ...s, models: ml.models.filter((m) => m.id !== undefined && m.name).map((m) => ({ id: m.id!, name: m.name! })) };
-                return s;
+                if (ml.models) return { ...newS, models: ml.models.filter((m) => m.id !== undefined && m.name).map((m) => ({ id: m.id!, name: m.name! })) };
+                return newS;
               }
               case "model": {
                 const md = d as Record<string, unknown>;
                 const tokens = (md.context_tokens ?? md.context ?? md.tokens) as number | undefined;
-                return { ...s, activeModelId: (md.active_id as number) ?? s.activeModelId, activeModelName: (md.active_name as string) ?? s.activeModelName, contextLimit: (md.context_limit as number) ?? s.contextLimit, contextTokens: tokens ?? s.contextTokens };
+                return { ...newS, activeModelId: (md.active_id as number) ?? newS.activeModelId, activeModelName: (md.active_name as string) ?? newS.activeModelName, contextLimit: (md.context_limit as number) ?? newS.contextLimit, contextTokens: tokens ?? newS.contextTokens };
               }
               case "tool_confirm": {
                 const cd = d as { id?: string };
-                return { ...s, messages: [...s.messages, { id: `confirm-${Date.now()}`, role: "system" as const, content: `🔧 Tool confirmation: ${cd.id}` }] };
+                return { ...newS, messages: [...newS.messages, { id: `confirm-${Date.now()}`, role: "system" as const, content: `🔧 Tool confirmation: ${cd.id}` }] };
               }
             }
           }
 
+          // ── AF: tool call frames ─────────────────────────────────────
           if (tag === "AF" && json) {
             const td = json as { id?: string; name?: string; input?: Record<string, unknown> };
             const toolId = td.id || "";
-            const newToolCalls = new Map(s.toolCalls);
-            const newMsgs = [...s.messages];
+            const newToolCalls = new Map(newS.toolCalls);
+            const newMsgs = [...newS.messages];
             if (td.name) {
               newToolCalls.set(toolId, { id: toolId, name: td.name, started: true, input_received: false });
-              newMsgs.push({ id: `tool-${toolId}`, role: "tool" as const, content: `🔧 **${td.name}**`, tool_id: toolId, tool_name: td.name });
+              newMsgs.push({ id: `tool-${toolId}`, role: "tool" as const, content: `🔧 **${td.name}**`, tool_id: toolId, tool_name: td.name, history_id: history_id || undefined });
             } else if (td.input) {
               const tc = newToolCalls.get(toolId);
               if (tc) { tc.input = td.input; tc.input_received = true; }
               const idx = newMsgs.findIndex((m) => m.tool_id === toolId);
               if (idx >= 0) newMsgs[idx] = { ...newMsgs[idx], content: `🔧 **${newMsgs[idx].tool_name || "Tool"}**\n\`\`\`json\n${JSON.stringify(td.input, null, 2)}\n\`\`\`` };
             }
-            return { ...s, toolCalls: newToolCalls, messages: newMsgs };
+            return { ...newS, toolCalls: newToolCalls, messages: newMsgs };
           }
 
+          // ── UF: tool result frames ──────────────────────────────────
           if (tag === "UF" && json) {
             const rd = json as { id?: string; is_error?: boolean; output?: unknown };
             const toolId = rd.id || "";
@@ -359,23 +327,26 @@ function App() {
               else outStr = JSON.stringify(rd.output, null, 2);
             }
             if (outStr.length > 500) outStr = outStr.slice(0, 500) + "\n… (truncated)";
-            const tc = s.toolCalls.get(toolId);
+            const tc = newS.toolCalls.get(toolId);
             const toolName = tc?.name || "Tool";
-            const newMsgs = [...s.messages];
+            const newMsgs = [...newS.messages];
             const idx = newMsgs.findIndex((m) => m.tool_id === toolId);
-            if (idx >= 0) newMsgs[idx] = { ...newMsgs[idx], content: isError ? `❌ **${toolName}** (error)\n\`\`\`\n${outStr}\n\`\`\`` : `✅ **${toolName}**\n\`\`\`\n${outStr}\n\`\`\``, is_error: isError };
-            return { ...s, messages: newMsgs };
+            if (idx >= 0) newMsgs[idx] = { ...newMsgs[idx], content: isError ? `❌ **${toolName}** (error)\n\`\`\`\n${outStr}\n\`\`\`` : `✅ **${toolName}**\n\`\`\`\n${outStr}\n\`\`\``, is_error: isError, history_id: history_id || newMsgs[idx].history_id };
+            return { ...newS, messages: newMsgs };
           }
 
-          return s;
-        }));
+          return newS;
+        }});
       });
       if (cancelled) { un2(); return; }
       unlisteners.push(un2);
 
+      // ─── core-status ────────────────────────────────────────────────
       const un3 = await listen<StatusEvent>("core-status", (ev) => {
         const { session_id, connected, message } = ev.payload;
-        setSessions((prev) => prev.map((s) => s.id === session_id ? { ...s, connected, statusMsg: message } : s));
+        dispatch({ type: "UPDATE_SESSION", sessionId: session_id, updater: (s) => ({
+          ...s, connected, statusMsg: message,
+        })});
       });
       if (cancelled) { un3(); return; }
       unlisteners.push(un3);
@@ -385,13 +356,64 @@ function App() {
     return () => { cancelled = true; unlisteners.forEach((fn) => { try { fn(); } catch { /* */ } }); };
   }, []);
 
-  // Scroll to bottom
-  useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [activeSess?.messages]);
+  // ─── Auto-create initial session ─────────────────────────────────────
+  // Uses cancelled flag to handle React 18 StrictMode double-fire.
+  // No createdRef guard — that would break HMR (refs persist across hot reloads).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const id = await invoke<string>("create_session", { binaryPath: "", configPath: "" });
+        if (!cancelled) {
+          const newSess = createSessionState(id);
+          dispatch({ type: "ADD_SESSION", session: newSess });
+        }
+      } catch (err) {
+        if (!cancelled) {
+          console.error("Failed to auto-create session:", err);
+          setInitError(String(err));
+        }
+      } finally {
+        if (!cancelled) setInitializing(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Scroll to bottom — only if user hasn't scrolled away
+  const userScrolledAwayRef = useRef(false);
+  const messagesContainerRef = useRef<HTMLDivElement | null>(null);
+
+  // Auto-scroll + scroll listener — combined so we only attach when container exists
+  useEffect(() => {
+    const container = messagesContainerRef.current;
+    if (!container) return;
+
+    const onScroll = () => {
+      // Immediately disable following on ANY scroll away from exact bottom
+      const maxScroll = container.scrollHeight - container.clientHeight;
+      userScrolledAwayRef.current = container.scrollTop < maxScroll - 1;
+    };
+    container.addEventListener("scroll", onScroll, { passive: true });
+
+    // Auto-scroll to bottom only if user is at the bottom
+    if (!userScrolledAwayRef.current) {
+      messagesEndRef.current?.scrollIntoView({ behavior: "auto" });
+    }
+
+    return () => container.removeEventListener("scroll", onScroll);
+  }, [activeSess?.messages]);
 
   // ─── Close dropdowns on outside click ────────────────────────────────
 
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
+      if (ctxMenu) {
+        if (ctxMenuRef.current && !ctxMenuRef.current.contains(event.target as Node)) {
+          setCtxMenu(null);
+        }
+        return;
+      }
       if (uploadMenuRef.current && !uploadMenuRef.current.contains(event.target as Node)) {
         setShowUploadMenu(false);
       }
@@ -401,74 +423,86 @@ function App() {
     }
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, []);
+  }, [ctxMenu]);
 
   // ─── Auto-dismiss notifications ──────────────────────────────────────
 
   useEffect(() => {
     if (!activeSess || activeSess.notifications.length === 0) return;
+
+    const timers = notificationTimersRef.current;
+
+    // Clear all previous timers
+    timers.forEach((t) => clearTimeout(t));
+    timers.clear();
+
+    // Set new timers for each notification
     const now = Date.now();
-    const timers = activeSess.notifications.map((n) => {
+    for (const n of activeSess.notifications) {
       const elapsed = now - n.timestamp;
       const remaining = Math.max(0, 4000 - elapsed);
-      return setTimeout(() => {
-        setSessions((prev) => prev.map((s) => s.id === activeId ? { ...s, notifications: s.notifications.filter((nn) => nn.id !== n.id) } : s));
+      const timer = setTimeout(() => {
+        dispatch({ type: "UPDATE_SESSION", sessionId: activeSess.id, updater: (s) => ({
+          ...s,
+          notifications: s.notifications.filter((nn) => nn.id !== n.id),
+        })});
+        timers.delete(n.id);
       }, remaining);
-    });
-    return () => timers.forEach(clearTimeout);
-  }, [activeSess?.notifications, activeId]);
+      timers.set(n.id, timer);
+    }
+
+    return () => {
+      timers.forEach((t) => clearTimeout(t));
+      timers.clear();
+    };
+    // Only run when notifications array reference changes (new items added)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSess?.notifications.length, activeSess?.id]);
 
   // ─── Session lifecycle ──────────────────────────────────────────────
 
   const handleCreateSession = useCallback(async () => {
     try {
-      const id = await invoke<string>("create_session", { binaryPath });
+      setInitError(null);
+      const id = await invoke<string>("create_session", { binaryPath: "", configPath: "" });
       const newSess = createSessionState(id);
-      setSessions((prev) => [...prev, newSess]);
-      setActiveId(id);
+      dispatch({ type: "ADD_SESSION", session: newSess });
     } catch (err) {
       console.error("Failed to create session:", err);
+      setInitError(String(err));
     }
-  }, [binaryPath]);
+  }, []);
 
   const handleCloseSession = useCallback(async (id: string) => {
     try {
       await invoke("close_session", { sessionId: id });
     } catch { /* */ }
-    setSessions((prev) => {
-      const remaining = prev.filter((s) => s.id !== id);
-      if (activeId === id) setActiveId(remaining.length > 0 ? remaining[remaining.length - 1].id : null);
-      return remaining;
-    });
-  }, [activeId]);
+    dispatch({ type: "REMOVE_SESSION", sessionId: id });
+  }, []);
 
   const switchSession = useCallback((id: string) => {
-    setActiveId(id);
+    dispatch({ type: "SET_ACTIVE", sessionId: id });
     setShowUrlModal(false);
   }, []);
 
   // ─── Input handling ─────────────────────────────────────────────────
 
   const setInput = useCallback((val: string) => {
-    setSessions((prev) => prev.map((s) => s.id === activeId ? { ...s, input: val } : s));
-  }, [activeId]);
-
-  const setStaged = useCallback((fn: StagedMedia[] | ((prev: StagedMedia[]) => StagedMedia[])) => {
-    setSessions((prev) => prev.map((s) => {
-      if (s.id !== activeId) return s;
-      const newStaged = typeof fn === "function" ? (fn as (prev: StagedMedia[]) => StagedMedia[])(s.staged) : fn;
-      return { ...s, staged: newStaged };
-    }));
+    if (!activeId) return;
+    dispatch({ type: "UPDATE_SESSION", sessionId: activeId, updater: (s) => ({ ...s, input: val }) });
   }, [activeId]);
 
   const confirmUrl = useCallback((url: string, type: string) => {
-    setStaged((prev: StagedMedia[]) => [...prev, { id: crypto.randomUUID(), media_type: type as MediaItem["media_type"], uri: url, name: url }]);
+    if (!activeId) return;
+    const newItem: StagedMedia = { id: crypto.randomUUID(), media_type: type as MediaItem["media_type"], uri: url, name: url };
+    dispatch({ type: "UPDATE_SESSION", sessionId: activeId, updater: (s) => ({ ...s, staged: [...s.staged, newItem] }) });
     setShowUrlModal(false);
-  }, [setStaged]);
+  }, [activeId]);
 
   const removeStaged = useCallback((id: string) => {
-    setStaged((prev: StagedMedia[]) => prev.filter((m) => m.id !== id));
-  }, [setStaged]);
+    if (!activeId) return;
+    dispatch({ type: "UPDATE_SESSION", sessionId: activeId, updater: (s) => ({ ...s, staged: s.staged.filter((m) => m.id !== id) }) });
+  }, [activeId]);
 
   // ─── Send / Cancel / Clear ──────────────────────────────────────────
 
@@ -481,13 +515,26 @@ function App() {
 
     const mediaItems: MediaItem[] = activeSess.staged.map((s) => ({ media_type: s.media_type, uri: s.uri, name: s.name }));
 
-    setSessions((prev) => prev.map((s) => s.id === activeId ? { ...s, input: "", staged: [], statusMsg: "Sending…" } : s));
+    // Don't create an optimistic user message — wait for alayacore echoes.
+    // Show "Sending…" status until echoes arrive.
+    dispatch({ type: "UPDATE_SESSION", sessionId: activeSess.id, updater: (s) => ({
+      ...s,
+      input: "",
+      staged: [],
+      statusMsg: "Sending…",
+      sendPending: true,
+    })});
 
     try {
-      await invoke("alayacore_send_prompt", { sessionId: activeId, text, media: mediaItems });
-      setSessions((prev) => prev.map((s) => s.id === activeId ? { ...s, statusMsg: "Waiting for response…" } : s));
+      await invoke("alayacore_send_prompt", { sessionId: activeSess.id, text, media: mediaItems });
+      // Status will be updated when echoes arrive
     } catch (err) {
-      setSessions((prev) => prev.map((s) => s.id === activeId ? { ...s, statusMsg: `Send error: ${err}`, messages: [...s.messages, { id: `err-${Date.now()}`, role: "system" as const, content: `⚠ Send error: ${err}` }] } : s));
+      dispatch({ type: "UPDATE_SESSION", sessionId: activeSess.id, updater: (s) => ({
+        ...s,
+        statusMsg: `Send error: ${err}`,
+        sendPending: false,
+        messages: [...s.messages, { id: `err-${Date.now()}`, role: "system" as const, content: `⚠ Send error: ${err}` }],
+      })});
     } finally {
       sendingRef.current = false;
     }
@@ -500,18 +547,16 @@ function App() {
   const handleCancelTask = useCallback(async () => {
     if (!activeId) return;
     try {
-      setSessions((prev) => prev.map((s) => s.id === activeId ? { ...s, statusMsg: "Cancelling…" } : s));
+      dispatch({ type: "UPDATE_SESSION", sessionId: activeId, updater: (s) => ({ ...s, statusMsg: "Cancelling…" }) });
       await invoke("alayacore_cancel", { sessionId: activeId });
     } catch (err) {
-      setSessions((prev) => prev.map((s) => s.id === activeId ? { ...s, statusMsg: `Cancel error: ${err}` } : s));
+      dispatch({ type: "UPDATE_SESSION", sessionId: activeId, updater: (s) => ({ ...s, statusMsg: `Cancel error: ${err}` }) });
     }
   }, [activeId]);
 
   const handleClear = useCallback(() => {
     if (!activeId) return;
-    setSessions((prev) => prev.map((s) => s.id === activeId ? {
-      ...s, messages: [], staged: [], historyContents: new Map(), historyRoles: new Map(), toolCalls: new Map(),
-    } : s));
+    dispatch({ type: "UPDATE_SESSION", sessionId: activeId, updater: () => createSessionState(activeId) });
   }, [activeId]);
 
   const handleSaveSession = useCallback(async () => {
@@ -520,107 +565,32 @@ function App() {
     if (!name) return;
     try {
       await invoke("alayacore_save", { sessionId: activeId, filename: name });
-      setSessions((prev) => prev.map((s) => s.id === activeId ? { ...s, statusMsg: `Saving to ${name}…` } : s));
+      dispatch({ type: "UPDATE_SESSION", sessionId: activeId, updater: (s) => ({ ...s, statusMsg: `Saving to ${name}…` }) });
     } catch (err) {
-      setSessions((prev) => prev.map((s) => s.id === activeId ? { ...s, statusMsg: `Save error: ${err}` } : s));
+      dispatch({ type: "UPDATE_SESSION", sessionId: activeId, updater: (s) => ({ ...s, statusMsg: `Save error: ${err}` }) });
     }
   }, [activeId]);
 
-  const handleForkSession = useCallback(async () => {
-    if (!activeId) return;
-    const historyId = prompt("Fork up to history ID (number):");
-    if (!historyId) return;
-    const name = prompt("Fork to filename:", `fork-${Date.now()}.md`);
+  const handleForkMessage = useCallback(async (msg: Message) => {
+    const hid = msg.history_id;
+    if (!hid || !activeId) return;
+    const name = prompt(`Fork up to history ID ${hid}, save as:`, `fork-${Date.now()}.md`);
     if (!name) return;
     try {
-      await invoke("alayacore_fork", { sessionId: activeId, historyId: historyId.trim(), filename: name });
-      setSessions((prev) => prev.map((s) => s.id === activeId ? { ...s, statusMsg: `Forking to ${name}…` } : s));
+      await invoke("alayacore_fork", { sessionId: activeId, historyId: hid, filename: name });
+      dispatch({ type: "UPDATE_SESSION", sessionId: activeId, updater: (s) => ({ ...s, statusMsg: `Forked to ${name}` }) });
     } catch (err) {
-      setSessions((prev) => prev.map((s) => s.id === activeId ? { ...s, statusMsg: `Fork error: ${err}` } : s));
+      dispatch({ type: "UPDATE_SESSION", sessionId: activeId, updater: (s) => ({ ...s, statusMsg: `Fork error: ${err}` }) });
     }
   }, [activeId]);
 
   const handleSetModel = useCallback(async (modelId: number) => {
     if (!activeId) return;
     try {
-      setSessions((prev) => prev.map((s) => s.id === activeId ? { ...s, statusMsg: "Switching model…" } : s));
+      dispatch({ type: "UPDATE_SESSION", sessionId: activeId, updater: (s) => ({ ...s, statusMsg: "Switching model…" }) });
       await invoke("alayacore_model_set", { sessionId: activeId, modelId });
     } catch (err) {
-      setSessions((prev) => prev.map((s) => s.id === activeId ? { ...s, statusMsg: `Model switch failed: ${err}` } : s));
-    }
-  }, [activeId]);
-
-  const handleReason = useCallback(async (level: number) => {
-    if (!activeId) return;
-    try {
-      await invoke("alayacore_reason", { sessionId: activeId, level });
-    } catch (err) {
-      console.error("Reason error:", err);
-    }
-  }, [activeId]);
-
-  const handleThemeSet = useCallback(async (name: string) => {
-    if (!activeId) return;
-    try {
-      await invoke("alayacore_theme_set", { sessionId: activeId, name });
-    } catch (err) {
-      console.error("Theme set error:", err);
-    }
-  }, [activeId]);
-
-  const handleModelLoad = useCallback(async () => {
-    if (!activeId) return;
-    try {
-      await invoke("alayacore_model_load", { sessionId: activeId });
-    } catch (err) {
-      console.error("Model load error:", err);
-    }
-  }, [activeId]);
-
-  const handleModelSync = useCallback(async (config: string) => {
-    if (!activeId) return;
-    try {
-      await invoke("alayacore_model_sync", { sessionId: activeId, config });
-    } catch (err) {
-      console.error("Model sync error:", err);
-    }
-  }, [activeId]);
-
-  const handleVideoConfig = useCallback(async (fps: number, res: number) => {
-    if (!activeId) return;
-    try {
-      await invoke("alayacore_video_config", { sessionId: activeId, fps, res });
-    } catch (err) {
-      console.error("Video config error:", err);
-    }
-  }, [activeId]);
-
-  const handleContinue = useCallback(async () => {
-    if (!activeId) return;
-    try {
-      await invoke("alayacore_continue", { sessionId: activeId });
-      setSessions((prev) => prev.map((s) => s.id === activeId ? { ...s, statusMsg: "Continuing…" } : s));
-    } catch (err) {
-      setSessions((prev) => prev.map((s) => s.id === activeId ? { ...s, statusMsg: `Continue error: ${err}` } : s));
-    }
-  }, [activeId]);
-
-  const handleSummarize = useCallback(async () => {
-    if (!activeId) return;
-    try {
-      await invoke("alayacore_summarize", { sessionId: activeId });
-      setSessions((prev) => prev.map((s) => s.id === activeId ? { ...s, statusMsg: "Summarizing…" } : s));
-    } catch (err) {
-      setSessions((prev) => prev.map((s) => s.id === activeId ? { ...s, statusMsg: `Summarize error: ${err}` } : s));
-    }
-  }, [activeId]);
-
-  const handleToolConfirm = useCallback(async (id: string, allowed: boolean) => {
-    if (!activeId) return;
-    try {
-      await invoke("alayacore_confirm", { sessionId: activeId, id, allowed });
-    } catch (err) {
-      console.error("Confirm error:", err);
+      dispatch({ type: "UPDATE_SESSION", sessionId: activeId, updater: (s) => ({ ...s, statusMsg: `Model switch failed: ${err}` }) });
     }
   }, [activeId]);
 
@@ -639,17 +609,19 @@ function App() {
     input.onchange = async () => {
       const file = input.files?.[0];
       if (file) {
-        input.onchange = null; // prevent double-fire
+        input.onchange = null;
         try {
           const uri = await fileToDataUri(file);
-          setStaged((prev) => [...prev, { id: crypto.randomUUID(), media_type: type as MediaItem["media_type"], uri, name: file.name }]);
-        } catch { /* file read failed silently */ }
+          if (!activeId) return;
+          const newItem: StagedMedia = { id: crypto.randomUUID(), media_type: type as MediaItem["media_type"], uri, name: file.name };
+          dispatch({ type: "UPDATE_SESSION", sessionId: activeId, updater: (s) => ({ ...s, staged: [...s.staged, newItem] }) });
+        } catch { /* */ }
       }
       if (input.parentNode) input.parentNode.removeChild(input);
     };
     document.body.appendChild(input);
     input.click();
-  }, [setStaged]);
+  }, [activeId]);
 
   const handleModelClick = useCallback(() => {
     setShowModelMenu((prev) => !prev);
@@ -659,7 +631,7 @@ function App() {
     if (!activeId) return;
     try {
       const lines = await invoke<string[]>("get_stderr_log", { sessionId: activeId });
-      setSessions((prev) => prev.map((s) => s.id === activeId ? { ...s, stderrLines: lines } : s));
+      dispatch({ type: "UPDATE_SESSION", sessionId: activeId, updater: (s) => ({ ...s, stderrLines: lines }) });
     } catch { /* */ }
   }, [activeId]);
 
@@ -674,12 +646,13 @@ function App() {
       }
     }
     if (msg.content && msg.content !== "(media message)") {
-      out.push(<div key="text" className="message-text">{msg.content.split("\n").map((line, i) => <span key={i}>{line}{i < msg.content.split("\n").length - 1 && <br />}</span>)}</div>);
+      const lines = msg.content.split("\n");
+      out.push(<div key="text" className="message-text">{lines.map((line, i) => <span key={i}>{line}{i < lines.length - 1 && <br />}</span>)}</div>);
     }
     return out;
   }
 
-  // ─── Render helpers: HomeScreen-style input ──────────────────────────
+  // ─── Render helpers: Search box (HomeScreen-style) ───────────────────
 
   const renderSearchBox = () => {
     if (!activeSess) return null;
@@ -803,7 +776,9 @@ function App() {
             <span className="notification-icon">{n.type === "error" ? "⚠" : "ℹ"}</span>
             <span className="notification-text">{n.text}</span>
             <button className="notification-close" onClick={() => {
-              setSessions((prev) => prev.map((s) => s.id === activeId ? { ...s, notifications: s.notifications.filter((nn) => nn.id !== n.id) } : s));
+              dispatch({ type: "UPDATE_SESSION", sessionId: activeSess.id, updater: (s) => ({
+                ...s, notifications: s.notifications.filter((nn) => nn.id !== n.id),
+              })});
             }}>✕</button>
           </div>
         ))}
@@ -813,23 +788,38 @@ function App() {
 
   // ─── Render ─────────────────────────────────────────────────────────
 
-  // Show minimal HomeScreen if no active session
+  // No session at all — show minimal header, then loading or error
   if (!activeSess) {
     return (
       <div className="app">
-        <div className="hs-container">
-          <div className="hs-bg-layer">
-            <div className="hs-bg-orb hs-bg-orb-1" />
-            <div className="hs-bg-orb hs-bg-orb-2" />
-            <div className="hs-bg-orb hs-bg-orb-3" />
-          </div>
-          <div className="logo-bar">
+        <div className="hs-bg-layer">
+          <div className="hs-bg-orb hs-bg-orb-1" />
+          <div className="hs-bg-orb hs-bg-orb-2" />
+          <div className="hs-bg-orb hs-bg-orb-3" />
+        </div>
+        <header className="app-header">
+          <div className="header-top">
             <h1>AlayaFace</h1>
             <div className="connection-controls">
-              <input type="text" placeholder="alayacore binary path (auto-detect)" value={binaryPath} onChange={(e) => setBinaryPath(e.target.value)} className="binary-input" />
               <button onClick={handleCreateSession} className="connect-btn">+ New Session</button>
             </div>
           </div>
+        </header>
+        <div className="chat-area chat-area-centered">
+          {initializing ? (
+            <div className="hs-container-inline">
+              <div className="hs-logo">
+                <span>AlayaFace</span>
+              </div>
+              <div className="hs-tagline">Connecting…</div>
+            </div>
+          ) : (
+            <div className="hs-container-inline">
+              <div className="hs-tagline" style={{ color: "#ef4444" }}>⚠ {initError || "Failed to start"}</div>
+              {initError && <div className="init-error">{initError}</div>}
+              <button onClick={handleCreateSession} className="connect-btn" style={{ marginTop: 12 }}>Retry</button>
+            </div>
+          )}
         </div>
       </div>
     );
@@ -851,10 +841,8 @@ function App() {
         <div className="header-top">
           <h1>AlayaFace</h1>
           <div className="connection-controls">
-            <input type="text" placeholder="alayacore binary path (auto-detect)" value={binaryPath} onChange={(e) => setBinaryPath(e.target.value)} className="binary-input" />
             <button onClick={handleCreateSession} className="connect-btn">+ New Session</button>
             <button onClick={handleSaveSession} disabled={activeSess.messages.length === 0} className="save-btn" title="Save session to file">Save</button>
-            <button onClick={handleForkSession} disabled={activeSess.messages.length === 0} className="fork-btn" title="Fork session up to history ID">Fork</button>
             <button onClick={() => { setShowLogs(!showLogs); if (!showLogs) fetchStderr(); }} className="log-btn">Logs</button>
           </div>
         </div>
@@ -862,10 +850,10 @@ function App() {
         {/* Tab bar */}
         {sessions.length > 0 && (
           <div className="tab-bar">
-            {sessions.map((s) => (
+            {sessions.map((s, i) => (
               <div key={s.id} className={`tab ${s.id === activeId ? "tab-active" : ""} ${!s.connected ? "tab-disconnected" : ""}`} onClick={() => switchSession(s.id)}>
                 <span className="tab-dot" />
-                <span className="tab-label">Session {sessions.indexOf(s) + 1}</span>
+                <span className="tab-label">Session {i + 1}</span>
                 <button className="tab-close" onClick={(e) => { e.stopPropagation(); handleCloseSession(s.id); }} title="Close session">✕</button>
               </div>
             ))}
@@ -873,33 +861,35 @@ function App() {
         )}
 
         {activeSess && (
-          <>
-            <div className={`status ${activeSess.connected ? "connected" : "disconnected"}`}>{activeSess.statusMsg}</div>
-          </>
+          <div className={`status ${activeSess.connected ? "connected" : "disconnected"}`}>{activeSess.statusMsg}</div>
         )}
       </header>
 
       {/* Chat area */}
       <div className={`chat-area ${activeSess.messages.length === 0 ? "chat-area-centered" : ""}`}>
         {activeSess.messages.length === 0 ? (
-          /* ─── HomeScreen-style welcome ─── */
+          /* ─── Empty state: just the input box ─── */
           <div className="hs-container-inline">
-            <div className="hs-logo">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                <path d="M12 3l1.5 4.5L18 9l-4.5 1.5L12 15l-1.5-4.5L6 9l4.5-1.5L12 3z"/>
-                <path d="M19 14l1 3 3 1-3 1-1 3-1-3-3-1 3-1 1-3z" opacity="0.6"/>
-              </svg>
-              <span>AlayaFace</span>
-            </div>
-            <div className="hs-tagline">AI-powered search &amp; reasoning</div>
             {renderSearchBox()}
           </div>
         ) : (
           /* ─── Messages + Input ─── */
           <>
-            <div className="messages">
+            <div
+              ref={messagesContainerRef}
+              className="messages"
+            >
               {activeSess.messages.map((msg) => (
-                <div key={msg.id} className={`message message-${msg.role}`}>
+                <div
+                  key={msg.id}
+                  className={`message message-${msg.role}${msg.history_id ? " message-has-ctx" : ""}`}
+                  onContextMenu={(e) => {
+                    if (msg.history_id) {
+                      e.preventDefault();
+                      setCtxMenu({ x: e.clientX, y: e.clientY, message: msg });
+                    }
+                  }}
+                >
                   <div className="message-header">
                     {msg.role === "user" && "🧑 You"}
                     {msg.role === "assistant" && "🤖 Assistant"}
@@ -912,9 +902,10 @@ function App() {
                   </div>
                 </div>
               ))}
-              {Array.from(activeSess.historyContents.entries()).filter(([_, c]) => c.length > 0).slice(-1).map(([hid]) => (
-                <div key={`cursor-${hid}`} className="message message-assistant cursor-blink">▊</div>
-              ))}
+              {/* Blinking cursor when awaiting response or processing */}
+              {(activeSess.sendPending || Array.from(activeSess.historyContents.entries()).length > 0) && (
+                <div className="message message-assistant cursor-blink">▊</div>
+              )}
               <div ref={messagesEndRef} />
             </div>
 
@@ -930,6 +921,26 @@ function App() {
           </>
         )}
       </div>
+
+      {/* Context menu */}
+      {ctxMenu && (
+        <div
+          ref={ctxMenuRef}
+          className="ctx-menu"
+          style={{ left: ctxMenu.x, top: ctxMenu.y }}
+        >
+          <div
+            className="ctx-menu-item"
+            onClick={() => {
+              handleForkMessage(ctxMenu.message);
+              setCtxMenu(null);
+            }}
+          >
+            <span className="ctx-menu-icon">⎆</span>
+            <span>Fork up to here</span>
+          </div>
+        </div>
+      )}
 
       {/* Log panel */}
       {showLogs && activeSess && (
