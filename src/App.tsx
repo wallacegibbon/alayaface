@@ -175,7 +175,9 @@ function App() {
             newHistoryContents.set(history_id, content);
             newMsgs.push({ id: `hist-${history_id}-${Date.now()}`, role, content, history_id });
           }
-          return { ...s, historyContents: newHistoryContents, messages: newMsgs };
+          // Clear sendPending once the assistant starts responding (AT/AR means the
+          // send was processed even if the user echo was missed due to a race).
+          return { ...s, historyContents: newHistoryContents, messages: newMsgs, sendPending: false };
         }});
       });
       if (cancelled) { un1(); return; }
@@ -246,7 +248,8 @@ function App() {
               case "task": {
                 const td = d as Record<string, unknown>;
                 const tokens = (td.context ?? td.tokens ?? td.context_tokens ?? td.usage) as number | undefined;
-                return { ...newS, taskRunning: (td.in_progress as boolean) ?? false, contextTokens: tokens ?? newS.contextTokens, statusMsg: td.in_progress ? "Task in progress…" : "Task complete" };
+                const done = !(td.in_progress as boolean);
+                return { ...newS, taskRunning: !done, contextTokens: tokens ?? newS.contextTokens, statusMsg: done ? "Task complete" : "Task in progress…", sendPending: done ? false : newS.sendPending };
               }
               case "error": {
                 const ed = d as { text?: string };
