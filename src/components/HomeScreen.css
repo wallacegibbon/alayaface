@@ -154,7 +154,7 @@
     0 0 0 2px rgba(99, 102, 241, 0.2);
 }
 
-/* ─── Search Input ──────────────────────────────────────────────────── */
+/* ─── Search Input (multi-line textarea) ────────────────────────────── */
 
 .hs-search-input {
   width: 100%;
@@ -162,9 +162,20 @@
   border: none;
   outline: none;
   font-size: 16px;
+  line-height: 1.5;
   background: transparent;
   color: #1a1a1a;
   transition: color 0.15s ease;
+  resize: none;
+  max-height: calc(1.5em * 3 + 18px + 18px); /* 3 lines + padding */
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+  font-family: inherit;
+}
+
+.hs-search-input:focus {
+  scrollbar-color: rgba(255,255,255,0.15) transparent;
 }
 
 .hs-search-input::placeholder {

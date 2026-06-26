@@ -137,7 +137,7 @@ function App() {
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; message: Message } | null>(null);
   const sendingRef = useRef(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const uploadMenuRef = useRef<HTMLDivElement>(null);
   const modelMenuRef = useRef<HTMLDivElement>(null);
   const uploadTriggerRef = useRef<HTMLButtonElement>(null);
@@ -564,8 +564,12 @@ function App() {
     }
   }, [activeSess, activeId]);
 
-  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); }
+  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      handleSend();
+    }
+    // Let arrow keys (up/down) scroll naturally within the textarea
   }, [handleSend]);
 
   const handleCancelTask = useCallback(async () => {
@@ -675,15 +679,15 @@ function App() {
               ))}
             </div>
           )}
-          <input
+          <textarea
             ref={inputRef}
-            type="text"
             className="hs-search-input"
             placeholder={activeSess.staged.length > 0 ? "Add a message…" : "Type a message…"}
             value={activeSess.input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
             disabled={!activeSess.connected}
+            rows={1}
           />
           <div className="hs-search-controls">
             <div className="hs-controls-left">
