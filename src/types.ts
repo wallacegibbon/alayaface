@@ -87,6 +87,8 @@ export interface SessionState {
   pendingUserParts: PendingUserPart[];
   /** Whether we're waiting for user echoes after sending */
   sendPending: boolean;
+  /** History IDs of user echo frames already processed (dedup guard). */
+  processedEchoIds: Set<string>;
 }
 
 export interface PendingUserPart {
@@ -214,6 +216,7 @@ export function createSessionState(id: string): SessionState {
     input: "",
     pendingUserParts: [],
     sendPending: false,
+    processedEchoIds: new Set(),
   };
 }
 

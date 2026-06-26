@@ -16,7 +16,6 @@ import {
   createSessionState,
   isUserEchoTag,
   echoTagToMediaType,
-  echoTagToLabel,
 } from "./types";
 import "./App.css";
 import "./components/HomeScreen.css";
@@ -29,7 +28,7 @@ interface UrlModalProps {
   onConfirm: (url: string, type: string) => void;
 }
 
-// ─── Reducer for session state (more efficient than useState spread) ─
+// ─── Reducer for session state ───────────────────────────────────────
 
 type SessionAction =
   | { type: "UPDATE_SESSION"; sessionId: string; updater: (s: SessionState) => SessionState }
@@ -40,8 +39,8 @@ type SessionAction =
 interface SessionReducerState {
   sessions: SessionState[];
   activeId: string | null;
-  /** Pending updaters for sessions that haven't been added yet (race from early frames). */
-  pendingSessionEvents: Map<string, Array<(s: SessionState) => SessionState>>;
+  /** Updaters queued before the target session was registered. */
+  pendingUpdates: Map<string, Array<(s: SessionState) => SessionState>>;
 }
 
 function sessionReducer(state: SessionReducerState, action: SessionAction): SessionReducerState {
@@ -49,11 +48,10 @@ function sessionReducer(state: SessionReducerState, action: SessionAction): Sess
     case "UPDATE_SESSION": {
       const exists = state.sessions.some((s) => s.id === action.sessionId);
       if (!exists) {
-        // Session not yet registered — buffer the update for later replay
-        const pending = new Map(state.pendingSessionEvents);
-        const existing = pending.get(action.sessionId) || [];
-        pending.set(action.sessionId, [...existing, action.updater]);
-        return { ...state, pendingSessionEvents: pending };
+        const pending = new Map(state.pendingUpdates);
+        const arr = pending.get(action.sessionId) || [];
+        pending.set(action.sessionId, [...arr, action.updater]);
+        return { ...state, pendingUpdates: pending };
       }
       return {
         ...state,
@@ -64,38 +62,33 @@ function sessionReducer(state: SessionReducerState, action: SessionAction): Sess
     }
     case "REMOVE_SESSION": {
       const remaining = state.sessions.filter((s) => s.id !== action.sessionId);
-      // Clean up pending events too
-      const pending = new Map(state.pendingSessionEvents);
+      const pending = new Map(state.pendingUpdates);
       pending.delete(action.sessionId);
       return {
         ...state,
         sessions: remaining,
-        pendingSessionEvents: pending,
+        pendingUpdates: pending,
         activeId: state.activeId === action.sessionId
           ? (remaining.length > 0 ? remaining[remaining.length - 1].id : null)
           : state.activeId,
       };
     }
     case "ADD_SESSION": {
-      const newSessions = [...state.sessions, action.session];
-      const sid = action.session.id;
-      // Apply any pending events that arrived before the session was registered
-      const pending = new Map(state.pendingSessionEvents);
-      const updates = pending.get(sid) || [];
-      pending.delete(sid);
-      const finalSession = updates.reduce((s, updater) => updater(s), action.session);
-      // Replace the last entry (the raw session) with the updated one
-      newSessions[newSessions.length - 1] = finalSession;
+      const pending = new Map(state.pendingUpdates);
+      const updates = pending.get(action.session.id) || [];
+      pending.delete(action.session.id);
+      const session = updates.reduce((s, fn) => fn(s), action.session);
       return {
         ...state,
-        sessions: newSessions,
-        pendingSessionEvents: pending,
-        activeId: sid,
+        sessions: [...state.sessions, session],
+        pendingUpdates: pending,
+        activeId: action.session.id,
       };
     }
     case "SET_ACTIVE":
       return { ...state, activeId: action.sessionId };
   }
+  return state;
 }
 
 // ─── URL Modal ───────────────────────────────────────────────────────
@@ -131,7 +124,7 @@ function App() {
   const [{ sessions, activeId }, dispatch] = useReducer(sessionReducer, {
     sessions: [],
     activeId: null,
-    pendingSessionEvents: new Map(),
+    pendingUpdates: new Map(),
   });
   const [showLogs, setShowLogs] = useState(false);
   const [showUrlModal, setShowUrlModal] = useState<string | false>(false);
@@ -193,73 +186,53 @@ function App() {
           if (isUserEchoTag(tag)) {
             const mediaType = echoTagToMediaType(tag);
             const textContent = tag === "UT" ? (content || "") : "";
-            const label = echoTagToLabel(tag);
 
-            // Build media item for non-text echoes
-            const mediaItem: MediaItem | null = mediaType && content
-              ? { media_type: mediaType, uri: content }
-              : null;
-
-            // If this is the first user echo after a non-user frame (or initial),
-            // start a new pending user message
-            const newParts = [...s.pendingUserParts];
-
-            // Check if we already have a pending user message (consecutive user echoes)
-            // If no pending parts and we have messages, the last message might be a user message
-            // that we should append to
-            if (newParts.length === 0 && s.messages.length > 0) {
-              const lastMsg = s.messages[s.messages.length - 1];
-              if (lastMsg.role === "user" && lastMsg.history_id === history_id) {
-                // Same user message — update in place
-                const newMsgs = [...s.messages];
-                if (tag === "UT") {
-                  newMsgs[newMsgs.length - 1] = {
-                    ...lastMsg,
-                    content: textContent,
-                    history_id: history_id || undefined,
-                  };
-                } else if (mediaItem) {
-                  const existingMedia = lastMsg.media || [];
-                  newMsgs[newMsgs.length - 1] = {
-                    ...lastMsg,
-                    media: [...existingMedia, mediaItem],
-                    history_id: history_id || undefined,
-                  };
-                }
-                return { ...s, messages: newMsgs, sendPending: false };
-              }
+            // Dedup: skip if this exact history_id was already processed
+            if (history_id && s.processedEchoIds.has(history_id)) {
+              return s;
             }
 
-            // Accumulate into pending parts
-            newParts.push({
-              id: `userpart-${history_id || Date.now()}`,
-              historyId: history_id || "",
-              tag,
-              content: textContent || label,
-              media_type: mediaType || undefined,
-            });
+            // Render immediately: either append to the last user message
+            // (if it's the same turn) or create a new user message.
+            const newEchoIds = history_id ? new Set(s.processedEchoIds).add(history_id) : s.processedEchoIds;
+            const lastMsg = s.messages.length > 0 ? s.messages[s.messages.length - 1] : null;
+            const sameTurn = lastMsg?.role === "user" && !history_id
+              ? false
+              : lastMsg?.role === "user";
 
-            return { ...s, pendingUserParts: newParts, sendPending: false };
-          }
+            if (sameTurn) {
+              // Same turn — append to existing user message
+              const newMsgs = [...s.messages];
+              if (tag === "UT") {
+                newMsgs[newMsgs.length - 1] = {
+                  ...lastMsg!,
+                  content: (lastMsg!.content || "") + textContent,
+                  history_id: history_id || lastMsg!.history_id,
+                };
+              } else if (mediaType) {
+                const existingMedia = lastMsg!.media || [];
+                newMsgs[newMsgs.length - 1] = {
+                  ...lastMsg!,
+                  media: [...existingMedia, { media_type: mediaType, uri: content! }],
+                  history_id: history_id || lastMsg!.history_id,
+                };
+              }
+              return { ...s, messages: newMsgs, processedEchoIds: newEchoIds, sendPending: false };
+            }
 
-          // ── Non-user tag: flush any pending user content ─────────────
-          let newS = s;
-          if (newS.pendingUserParts.length > 0) {
-            const parts = newS.pendingUserParts;
-            const textParts = parts.filter((p) => p.tag === "UT").map((p) => p.content).join("\n");
-            const mediaParts: MediaItem[] = parts
-              .filter((p) => p.media_type)
-              .map((p) => ({ media_type: p.media_type!, uri: p.content }));
-
-            const userMsg: Message = {
-              id: `user-echo-${Date.now()}`,
+            // New turn — create a new user message
+            const newMsg: Message = {
+              id: `user-${history_id || Date.now()}`,
               role: "user",
-              content: textParts || (mediaParts.length > 0 ? "(media message)" : ""),
-              media: mediaParts.length > 0 ? mediaParts : undefined,
-              history_id: parts[0]?.historyId || undefined,
+              content: textContent,
+              media: mediaType && content ? [{ media_type: mediaType, uri: content }] : undefined,
+              history_id: history_id || undefined,
             };
-            newS = { ...newS, messages: [...newS.messages, userMsg], pendingUserParts: [] };
+            return { ...s, messages: [...s.messages, newMsg], processedEchoIds: newEchoIds, sendPending: false };
           }
+
+          // ── Non-user tag: no flush needed (user echos render immediately) ──
+          let newS = s;
 
           // ── SM: system messages ──────────────────────────────────────
           if (tag === "SM" && json) {
@@ -573,12 +546,17 @@ function App() {
 
   const handleForkMessage = useCallback(async (msg: Message) => {
     const hid = msg.history_id;
-    if (!hid || !activeId) return;
-    const name = prompt(`Fork up to history ID ${hid}, save as:`, `fork-${Date.now()}.md`);
-    if (!name) return;
+    if (!hid || !activeId || !/^\d+$/.test(hid)) return;
     try {
-      await invoke("alayacore_fork", { sessionId: activeId, historyId: hid, filename: name });
-      dispatch({ type: "UPDATE_SESSION", sessionId: activeId, updater: (s) => ({ ...s, statusMsg: `Forked to ${name}` }) });
+      const newId = await invoke<string>("fork_session", {
+        sourceSessionId: activeId,
+        historyId: hid,
+        binaryPath: "",
+      });
+      dispatch({ type: "UPDATE_SESSION", sessionId: activeId, updater: (s) => ({ ...s, statusMsg: `Forked up to history ${hid}` }) });
+      const newSess = createSessionState(newId);
+      dispatch({ type: "ADD_SESSION", session: newSess });
+      // SET_ACTIVE is handled by ADD_SESSION (it sets activeId = session.id)
     } catch (err) {
       dispatch({ type: "UPDATE_SESSION", sessionId: activeId, updater: (s) => ({ ...s, statusMsg: `Fork error: ${err}` }) });
     }

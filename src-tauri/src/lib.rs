@@ -820,6 +820,107 @@ async fn alayacore_fork(
     send_raw_to_session(&map, &session_id, tlv::TAG_USER_END, "").await
 }
 
+/// Fork a session up to a history ID, creating a new session.
+/// 1. Creates a new session directory with its own config
+/// 2. Tells the source session's alayacore to :fork <history_id> <target_session_file>
+/// 3. Starts a new alayacore with the forked session file
+/// Returns the new session_id.
+#[tauri::command]
+async fn fork_session(
+    app: AppHandle,
+    source_session_id: String,
+    history_id: String,
+    binary_path: String,
+    sessions: State<'_, Sessions>,
+    model_cache: State<'_, ModelCache>,
+) -> Result<String, String> {
+    // 1. Create new session directory
+    let (_template_dir, sessions_dir) = ensure_alayaface_dirs()?;
+    let new_id = Uuid::new_v4().to_string();
+    let new_session_dir = create_session_dir(&sessions_dir, &new_id)?;
+    let target_file = new_session_dir.join("session.md").to_string_lossy().to_string();
+    let config_path = new_session_dir.join("config").to_string_lossy().to_string();
+
+    alog!("Forking session {} up to history {} → {}", &source_session_id, &history_id, &target_file);
+
+    // 2. Tell source session's alayacore to fork (synchronous command)
+    {
+        let map = sessions.0.lock().await;
+        let cmd = format!(":fork {} {}", history_id, target_file);
+        send_raw_to_session(&map, &source_session_id, tlv::TAG_USER_TEXT, &cmd).await?;
+        send_raw_to_session(&map, &source_session_id, tlv::TAG_USER_END, "").await?;
+    }
+
+    // 3. Wait for the session file to be written by alayacore
+    let target_path = std::path::Path::new(&target_file);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut seen_size = 0u64;
+    loop {
+        if let Ok(meta) = target_path.metadata() {
+            let len = meta.len();
+            if len > 0 && len == seen_size {
+                // File size stable — write is complete
+                alog!("Fork target file written ({} bytes)", len);
+                break;
+            }
+            if len > 0 {
+                seen_size = len; // Remember size, check stability next iteration
+            }
+        }
+        if std::time::Instant::now() > deadline {
+            if seen_size > 0 {
+                alog!("Fork target file size changed during wait, using anyway ({} bytes)", seen_size);
+                break;
+            }
+            return Err("Timeout waiting for fork to complete".to_string());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    // 4. Spawn a new alayacore with the forked session
+    let bin = if binary_path.is_empty() {
+        alayacore::find_binary()
+    } else {
+        binary_path
+    };
+
+    let proc = alayacore::spawn(&bin, &config_path, &target_file)
+        .map_err(|e| format!("Failed to start forked alayacore: {e}"))?;
+
+    let connected = Arc::new(AtomicBool::new(true));
+    let stderr_log = Arc::new(Mutex::new(Vec::new()));
+    let stdin = Arc::new(Mutex::new(proc.stdin));
+    let child = Arc::new(std::sync::Mutex::new(Some(proc.child)));
+
+    let handle = SessionHandle {
+        stdin: stdin.clone(),
+        connected: connected.clone(),
+        stderr_log: stderr_log.clone(),
+        child: child.clone(),
+        session_dir: new_session_dir,
+    };
+
+    sessions.0.lock().await.insert(new_id.clone(), handle);
+
+    spawn_stderr_collector(proc.stderr, stderr_log);
+    spawn_stdout_reader(
+        app.clone(),
+        new_id.clone(),
+        proc.stdout,
+        connected,
+        model_cache.0.clone(),
+        child.clone(),
+    );
+
+    let _ = app.emit("core-status", StatusEvent {
+        session_id: new_id.clone(),
+        connected: true,
+        message: format!("Forked session up to history {}", history_id),
+    });
+
+    Ok(new_id)
+}
+
 /// Set reasoning level — sends `:reason <level>` (0=off, 1=normal, 2=max).
 #[tauri::command]
 async fn alayacore_reason(
@@ -1075,6 +1176,7 @@ pub fn run() {
             alayacore_cancel,
             alayacore_save,
             alayacore_fork,
+            fork_session,
             alayacore_reason,
             alayacore_theme_set,
             alayacore_model_load,
