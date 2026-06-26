@@ -149,14 +149,16 @@ function App() {
 
   const activeSess = sessions.find((s) => s.id === activeId);
 
-  // ─── Event listeners (once) ─────────────────────────────────────────
-
+  // ─── Initialize: set up listeners FIRST, then create session ────────
+  // This avoids a race where alayacore emits events (model_list, etc.)
+  // before the Tauri event listeners are registered, which would cause
+  // the first session to miss the model list.
   useEffect(() => {
-    const unlisteners: UnlistenFn[] = [];
     let cancelled = false;
+    const unlisteners: UnlistenFn[] = [];
 
-    const setup = async () => {
-      // ─── tlv-delta (AT/AR streaming) ────────────────────────────────
+    (async () => {
+      // 1. Register all event listeners first
       const un1 = await listen<DeltaEvent>("tlv-delta", (ev) => {
         const { session_id, history_id, content, tag } = ev.payload;
         const role = tag === "AT" ? "assistant" : "reasoning";
@@ -179,7 +181,6 @@ function App() {
       if (cancelled) { un1(); return; }
       unlisteners.push(un1);
 
-      // ─── tlv-frame (all other frames) ───────────────────────────────
       const un2 = await listen<FrameEvent>("tlv-frame", (ev) => {
         const { session_id, tag, json, history_id, content } = ev.payload;
 
@@ -326,7 +327,6 @@ function App() {
       if (cancelled) { un2(); return; }
       unlisteners.push(un2);
 
-      // ─── core-status ────────────────────────────────────────────────
       const un3 = await listen<StatusEvent>("core-status", (ev) => {
         const { session_id, connected, message } = ev.payload;
         dispatch({ type: "UPDATE_SESSION", sessionId: session_id, updater: (s) => ({
@@ -335,18 +335,8 @@ function App() {
       });
       if (cancelled) { un3(); return; }
       unlisteners.push(un3);
-    };
 
-    setup();
-    return () => { cancelled = true; unlisteners.forEach((fn) => { try { fn(); } catch { /* */ } }); };
-  }, []);
-
-  // ─── Auto-create initial session ─────────────────────────────────────
-  // Uses cancelled flag to handle React 18 StrictMode double-fire.
-  // No createdRef guard — that would break HMR (refs persist across hot reloads).
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
+      // 2. Listeners are now registered — safe to create the session
       try {
         const id = await invoke<string>("create_session", { binaryPath: "", configPath: "" });
         if (!cancelled) {
@@ -362,7 +352,11 @@ function App() {
         if (!cancelled) setInitializing(false);
       }
     })();
-    return () => { cancelled = true; };
+
+    return () => {
+      cancelled = true;
+      unlisteners.forEach((fn) => { try { fn(); } catch { /* */ } });
+    };
   }, []);
 
   // ─── Initialize maximized state ─────────────────────────────────────
