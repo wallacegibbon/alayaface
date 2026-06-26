@@ -155,6 +155,7 @@ function App() {
   // the first session to miss the model list.
   useEffect(() => {
     let cancelled = false;
+    let createdSessionId: string | null = null;
     const unlisteners: UnlistenFn[] = [];
 
     (async () => {
@@ -342,9 +343,13 @@ function App() {
       // 2. Listeners are now registered — safe to create the session
       try {
         const id = await invoke<string>("create_session", { binaryPath: "", configPath: "" });
+        createdSessionId = id;
         if (!cancelled) {
           const newSess = createSessionState(id);
           dispatch({ type: "ADD_SESSION", session: newSess });
+        } else {
+          // StrictMode double-fire: close the orphaned process
+          try { await invoke("close_session", { sessionId: id }); } catch { /* */ }
         }
       } catch (err) {
         if (!cancelled) {
@@ -359,6 +364,10 @@ function App() {
     return () => {
       cancelled = true;
       unlisteners.forEach((fn) => { try { fn(); } catch { /* */ } });
+      // If a session was created and never used, close it
+      if (createdSessionId !== null) {
+        invoke("close_session", { sessionId: createdSessionId }).catch(() => {});
+      }
     };
   }, []);
 
