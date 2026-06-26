@@ -178,6 +178,27 @@ fn copy_dir(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> 
 
 // ─── Session Handle ──────────────────────────────────────────────────
 
+/// Kill a child process and wait for it to exit, with a 3-second timeout.
+/// Returns the child back so it can be used again if needed (though typically
+/// the child is consumed after killing).
+fn kill_child(child: &mut std::process::Child) {
+    let _ = child.stdin.take(); // close stdin to signal EOF
+    let _ = child.kill();
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if start.elapsed() > std::time::Duration::from_secs(3) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            Err(_) => break,
+        }
+    }
+}
+
 struct SessionHandle {
     stdin: Arc<Mutex<std::process::ChildStdin>>,
     connected: Arc<AtomicBool>,
@@ -194,21 +215,7 @@ impl Drop for SessionHandle {
     fn drop(&mut self) {
         if let Ok(mut guard) = self.child.lock() {
             if let Some(mut child) = guard.take() {
-                let _ = child.stdin.take();
-                let _ = child.kill();
-                let start = std::time::Instant::now();
-                loop {
-                    match child.try_wait() {
-                        Ok(Some(_)) => break,
-                        Ok(None) if start.elapsed() > std::time::Duration::from_secs(3) => {
-                            let _ = child.kill();
-                            let _ = child.wait();
-                            break;
-                        }
-                        Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
-                        Err(_) => break,
-                    }
-                }
+                kill_child(&mut child);
             }
         }
     }
@@ -286,20 +293,7 @@ fn spawn_stdout_reader(
         let reap_child = || {
             if let Ok(mut guard) = child.lock() {
                 if let Some(mut c) = guard.take() {
-                    let _ = c.stdin.take();
-                    let start = std::time::Instant::now();
-                    loop {
-                        match c.try_wait() {
-                            Ok(Some(_)) => break,
-                            Ok(None) if start.elapsed() > std::time::Duration::from_secs(3) => {
-                                let _ = c.kill();
-                                let _ = c.wait();
-                                break;
-                            }
-                            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
-                            Err(_) => break,
-                        }
-                    }
+                    kill_child(&mut c);
                 }
             }
         };
@@ -545,26 +539,11 @@ async fn close_session(
 ) -> Result<(), String> {
     let mut map = sessions.0.lock().await;
     if let Some(handle) = map.remove(&session_id) {
-        // Explicitly kill the child process
+        // Explicitly kill the child process in a blocking task
         let child_opt = handle.child.lock().unwrap().take();
         if let Some(mut child) = child_opt {
-            let _ = child.stdin.take(); // close stdin
-            let _ = child.kill();
-            // Wait briefly in a blocking task
             let _ = tokio::task::spawn_blocking(move || {
-                let start = std::time::Instant::now();
-                loop {
-                    match child.try_wait() {
-                        Ok(Some(_)) => break,
-                        Ok(None) if start.elapsed() > std::time::Duration::from_secs(3) => {
-                            let _ = child.kill();
-                            let _ = child.wait();
-                            break;
-                        }
-                        Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
-                        Err(_) => break,
-                    }
-                }
+                kill_child(&mut child);
             })
             .await;
         }
@@ -650,10 +629,8 @@ async fn delete_session_dir(
         if let Some(handle) = map.remove(&session_id) {
             let child_opt = handle.child.lock().unwrap().take();
             if let Some(mut child) = child_opt {
-                let _ = child.stdin.take();
-                let _ = child.kill();
                 let _ = tokio::task::spawn_blocking(move || {
-                    let _ = child.wait();
+                    kill_child(&mut child);
                 }).await;
             }
         }
