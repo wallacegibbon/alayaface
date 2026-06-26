@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import "./SessionManager.css";
 
@@ -27,9 +27,11 @@ function SessionManager({ onOpenSession, onNewSession, onClose, activeSessionIds
   const [sessions, setSessions] = useState<SessionDirInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
-  const [deleting, setDeleting] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [batchDeleting, setBatchDeleting] = useState(false);
+  const [confirmBatchDelete, setConfirmBatchDelete] = useState(false);
   const [openingId, setOpeningId] = useState<string | null>(null);
+  const listRef = useRef<HTMLDivElement>(null);
 
   const loadSessions = useCallback(async () => {
     setLoading(true);
@@ -48,18 +50,52 @@ function SessionManager({ onOpenSession, onNewSession, onClose, activeSessionIds
     loadSessions();
   }, [loadSessions]);
 
-  const handleDelete = useCallback(async (id: string) => {
-    setDeleting(true);
-    try {
-      await invoke("delete_session_dir", { sessionId: id });
-      setConfirmDelete(null);
-      await loadSessions();
-    } catch (err) {
-      setError(String(err));
-    } finally {
-      setDeleting(false);
+  // Clear selection when sessions list changes
+  useEffect(() => {
+    setSelectedIds(new Set());
+    setConfirmBatchDelete(false);
+  }, [sessions]);
+
+  const isActive = (id: string) => activeSessionIds.includes(id);
+  const deletableIds = sessions.filter((s) => !isActive(s.id)).map((s) => s.id);
+  const selectedDeletableCount = [...selectedIds].filter((id) => deletableIds.includes(id)).length;
+  const allDeletableSelected = deletableIds.length > 0 && deletableIds.every((id) => selectedIds.has(id));
+
+  const handleToggleSelect = useCallback((id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const handleSelectAll = useCallback(() => {
+    if (allDeletableSelected) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(deletableIds));
     }
-  }, [loadSessions]);
+  }, [allDeletableSelected, deletableIds]);
+
+  const handleBatchDelete = useCallback(async () => {
+    const toDelete = [...selectedIds].filter((id) => deletableIds.includes(id));
+    if (toDelete.length === 0) return;
+
+    setBatchDeleting(true);
+    try {
+      for (const id of toDelete) {
+        try {
+          await invoke("delete_session_dir", { sessionId: id });
+        } catch { /* skip individual failures */ }
+      }
+      setSelectedIds(new Set());
+      setConfirmBatchDelete(false);
+      await loadSessions();
+    } catch { /* */ } finally {
+      setBatchDeleting(false);
+    }
+  }, [selectedIds, deletableIds, loadSessions]);
 
   const handleOpen = useCallback(async (id: string) => {
     setOpeningId(id);
@@ -76,23 +112,76 @@ function SessionManager({ onOpenSession, onNewSession, onClose, activeSessionIds
     }
   }, [onOpenSession]);
 
-  const isActive = (id: string) => activeSessionIds.includes(id);
+  const handleSingleDelete = useCallback(async (id: string) => {
+    try {
+      await invoke("delete_session_dir", { sessionId: id });
+      await loadSessions();
+    } catch (err) {
+      setError(String(err));
+    }
+  }, [loadSessions]);
 
   return (
-    <div className="sm-overlay">
+    <div className="sm-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
       <div className="sm-panel">
         <div className="sm-header">
           <h2 className="sm-title">Session Manager</h2>
           <button className="sm-close" onClick={onClose} title="Close">✕</button>
         </div>
 
+        {/* ─── Toolbar ───────────────────────────────────────────── */}
         <div className="sm-toolbar">
           <button className="sm-btn sm-btn-primary" onClick={() => { onNewSession(); onClose(); }}>
-            + New Session
+            + New
           </button>
           <button className="sm-btn sm-btn-secondary" onClick={loadSessions} disabled={loading}>
-            ↻ Refresh
+            ↻
           </button>
+
+          <div className="sm-toolbar-sep" />
+
+          <button
+            className="sm-btn sm-btn-sm sm-btn-select"
+            onClick={handleSelectAll}
+            disabled={deletableIds.length === 0}
+            title={allDeletableSelected ? "Deselect all" : "Select all selectable"}
+          >
+            {allDeletableSelected ? "☐ None" : "☑ All"}
+          </button>
+
+          {selectedDeletableCount > 0 && (
+            <>
+              <div className="sm-toolbar-sep" />
+              {confirmBatchDelete ? (
+                <div className="sm-batch-confirm">
+                  <span className="sm-batch-confirm-text">
+                    Delete {selectedDeletableCount} session{selectedDeletableCount !== 1 ? "s" : ""}?
+                  </span>
+                  <button
+                    className="sm-btn sm-btn-sm sm-btn-danger"
+                    onClick={handleBatchDelete}
+                    disabled={batchDeleting}
+                  >
+                    {batchDeleting ? "…" : "Yes"}
+                  </button>
+                  <button
+                    className="sm-btn sm-btn-sm sm-btn-secondary"
+                    onClick={() => setConfirmBatchDelete(false)}
+                    disabled={batchDeleting}
+                  >
+                    No
+                  </button>
+                </div>
+              ) : (
+                <button
+                  className="sm-btn sm-btn-sm sm-btn-danger-outline"
+                  onClick={() => setConfirmBatchDelete(true)}
+                >
+                  🗑 Delete {selectedDeletableCount}
+                </button>
+              )}
+            </>
+          )}
         </div>
 
         {error && (
@@ -102,6 +191,7 @@ function SessionManager({ onOpenSession, onNewSession, onClose, activeSessionIds
           </div>
         )}
 
+        {/* ─── List ──────────────────────────────────────────────── */}
         {loading ? (
           <div className="sm-loading">Loading sessions…</div>
         ) : sessions.length === 0 ? (
@@ -111,73 +201,84 @@ function SessionManager({ onOpenSession, onNewSession, onClose, activeSessionIds
             <div className="sm-empty-sub">Create a new session to get started</div>
           </div>
         ) : (
-          <div className="sm-list">
-            {sessions.map((s) => (
-              <div key={s.id} className={`sm-item${isActive(s.id) ? " sm-item-active" : ""}`}>
-                <div className="sm-item-indicator">
-                  <span className={`sm-dot${isActive(s.id) ? " sm-dot-active" : ""}`} />
-                </div>
-                <div className="sm-item-info">
-                  <div className="sm-item-name">
-                    {s.id.slice(0, 8)}…{s.id.slice(-4)}
-                    {isActive(s.id) && <span className="sm-badge sm-badge-active">active</span>}
+          <div className="sm-list" ref={listRef}>
+            {sessions.map((s) => {
+              const active = isActive(s.id);
+              const selected = selectedIds.has(s.id);
+              return (
+                <div
+                  key={s.id}
+                  className={`sm-item${active ? " sm-item-active" : ""}${selected ? " sm-item-selected" : ""}`}
+                >
+                  {/* Checkbox — disabled for active sessions */}
+                  <label className="sm-checkbox-wrapper" title={active ? "Cannot delete active session" : "Select for batch operation"}>
+                    <input
+                      type="checkbox"
+                      className="sm-checkbox"
+                      checked={selected}
+                      disabled={active}
+                      onChange={() => handleToggleSelect(s.id)}
+                    />
+                    <span className="sm-checkbox-visual" />
+                  </label>
+
+                  {/* Status dot */}
+                  <div className="sm-item-indicator">
+                    <span className={`sm-dot${active ? " sm-dot-active" : ""}`} />
                   </div>
-                  <div className="sm-item-meta">
-                    <span>{formatDate(s.created_at)}</span>
-                    {s.has_session_file && <span className="sm-badge">has data</span>}
-                    {!s.has_session_file && <span className="sm-badge sm-badge-empty">empty</span>}
-                  </div>
-                </div>
-                <div className="sm-item-actions">
-                  {isActive(s.id) ? (
-                    <span className="sm-active-label">Running</span>
-                  ) : (
-                    <button
-                      className="sm-btn sm-btn-sm sm-btn-open"
-                      onClick={() => handleOpen(s.id)}
-                      disabled={openingId === s.id}
-                    >
-                      {openingId === s.id ? "…" : "▶ Open"}
-                    </button>
-                  )}
-                  {confirmDelete === s.id ? (
-                    <div className="sm-confirm-delete">
-                      <span className="sm-confirm-text">Delete?</span>
-                      <button
-                        className="sm-btn sm-btn-sm sm-btn-danger"
-                        onClick={() => handleDelete(s.id)}
-                        disabled={deleting}
-                      >
-                        {deleting ? "…" : "Yes"}
-                      </button>
-                      <button
-                        className="sm-btn sm-btn-sm sm-btn-secondary"
-                        onClick={() => setConfirmDelete(null)}
-                        disabled={deleting}
-                      >
-                        No
-                      </button>
+
+                  {/* Info */}
+                  <div className="sm-item-info">
+                    <div className="sm-item-name">
+                      {s.id.slice(0, 8)}…{s.id.slice(-4)}
+                      {active && <span className="sm-badge sm-badge-active">active</span>}
                     </div>
-                  ) : (
-                    <button
-                      className="sm-btn sm-btn-sm sm-btn-danger"
-                      onClick={() => setConfirmDelete(s.id)}
-                      title="Delete session"
-                      disabled={isActive(s.id)}
-                    >
-                      🗑
-                    </button>
-                  )}
+                    <div className="sm-item-meta">
+                      <span>{formatDate(s.created_at)}</span>
+                      {s.has_session_file && <span className="sm-badge">has data</span>}
+                      {!s.has_session_file && <span className="sm-badge sm-badge-empty">empty</span>}
+                    </div>
+                  </div>
+
+                  {/* Actions */}
+                  <div className="sm-item-actions">
+                    {active ? (
+                      <span className="sm-active-label">Running</span>
+                    ) : (
+                      <button
+                        className="sm-btn sm-btn-sm sm-btn-open"
+                        onClick={() => handleOpen(s.id)}
+                        disabled={openingId === s.id}
+                      >
+                        {openingId === s.id ? "…" : "Open"}
+                      </button>
+                    )}
+                    {!active && (
+                      <button
+                        className="sm-btn sm-btn-sm sm-btn-icon"
+                        onClick={() => handleSingleDelete(s.id)}
+                        title="Delete session"
+                      >
+                        🗑
+                      </button>
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
 
+        {/* ─── Footer ──────────────────────────────────────────────── */}
         <div className="sm-footer">
           <span className="sm-footer-text">
             {sessions.length} session{sessions.length !== 1 ? "s" : ""} on disk
             {activeSessionIds.length > 0 && ` · ${activeSessionIds.length} active`}
+            {selectedDeletableCount > 0 && (
+              <span className="sm-footer-selected">
+                · {selectedDeletableCount} selected
+              </span>
+            )}
           </span>
         </div>
       </div>
