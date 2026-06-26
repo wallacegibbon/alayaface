@@ -464,17 +464,15 @@ function App() {
   // ─── Auto-dismiss notifications ──────────────────────────────────────
 
   useEffect(() => {
-    if (!activeSess || activeSess.notifications.length === 0) return;
+    if (!activeSess) return;
 
     const timers = notificationTimersRef.current;
-
-    // Clear all previous timers
-    timers.forEach((t) => clearTimeout(t));
-    timers.clear();
-
-    // Set new timers for each notification
     const now = Date.now();
+
     for (const n of activeSess.notifications) {
+      // Only set a timer if one doesn't already exist for this notification
+      if (timers.has(n.id)) continue;
+
       const elapsed = now - n.timestamp;
       const remaining = Math.max(0, 4000 - elapsed);
       const timer = setTimeout(() => {
@@ -487,13 +485,17 @@ function App() {
       timers.set(n.id, timer);
     }
 
-    return () => {
-      timers.forEach((t) => clearTimeout(t));
-      timers.clear();
-    };
-    // Only run when notifications array reference changes (new items added)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeSess?.notifications.length, activeSess?.id]);
+    // Clean up timers for notifications that were already removed
+    const activeIds = new Set(activeSess.notifications.map((n) => n.id));
+    for (const [id, timer] of timers.entries()) {
+      if (!activeIds.has(id)) {
+        clearTimeout(timer);
+        timers.delete(id);
+      }
+    }
+
+    // No return cleanup needed — individual timers clean themselves up
+  }, [activeSess?.notifications]);
 
   // ─── Session lifecycle ──────────────────────────────────────────────
 
