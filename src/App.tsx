@@ -636,10 +636,15 @@ function App() {
     input.type = "file";
     input.accept = accept;
     input.style.display = "none";
+
+    const cleanup = () => {
+      input.onchange = null;
+      if (input.parentNode) input.parentNode.removeChild(input);
+    };
+
     input.onchange = async () => {
       const file = input.files?.[0];
       if (file) {
-        input.onchange = null;
         try {
           const uri = await fileToDataUri(file);
           if (!activeId) return;
@@ -647,8 +652,10 @@ function App() {
           dispatch({ type: "UPDATE_SESSION", sessionId: activeId, updater: (s) => ({ ...s, staged: [...s.staged, newItem] }) });
         } catch { /* */ }
       }
-      if (input.parentNode) input.parentNode.removeChild(input);
+      cleanup();
     };
+    // Handle cancellation (Escape key closes picker) to prevent DOM leak
+    input.addEventListener("cancel", cleanup);
     document.body.appendChild(input);
     input.click();
   }, [activeId]);
